@@ -444,7 +444,11 @@ static inline int fls(int x)
 
 #define ARCH_HAS_FAST_MULTIPLIER 1
 
+#ifdef CONFIG_UML
+#include <asm-generic/bitops/arch_hweight.h>
+#else
 #include <asm/arch_hweight.h>
+#endif
 
 #include <asm-generic/bitops/const_hweight.h>
 
