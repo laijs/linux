@@ -1277,6 +1277,12 @@ static void sched_avg_update(struct rq *rq)
 	s64 period = sched_avg_period();
 
 	while ((s64)(rq->clock - rq->age_stamp) > period) {
+		/*
+		 * Inline assembly required to prevent the compiler
+		 * optimising this loop into a divmod call.
+		 * See __iter_div_u64_rem() for another example of this.
+		 */
+		asm("" : "+rm" (rq->age_stamp));
 		rq->age_stamp += period;
 		rq->rt_avg /= 2;
 	}
@@ -2561,7 +2567,16 @@ void sched_fork(struct task_struct *p, int clone_flags)
 	if (p->sched_class->task_fork)
 		p->sched_class->task_fork(p);
 
+	/*
+	 * The child is not yet in the pid-hash so no cgroup attach races,
+	 * and the cgroup is pinned to this child due to cgroup_fork()
+	 * is ran before sched_fork().
+	 *
+	 * Silence PROVE_RCU.
+	 */
+	rcu_read_lock();
 	set_task_cpu(p, cpu);
+	rcu_read_unlock();
 
 #if defined(CONFIG_SCHEDSTATS) || defined(CONFIG_TASK_DELAY_ACCT)
 	if (likely(sched_info_on()))
