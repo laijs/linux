@@ -1005,7 +1005,6 @@ out:
 	return error;
 }
 
-#ifdef CONFIG_IRQSTACKS
 static inline int valid_irq_stack(unsigned long sp, struct task_struct *p,
 				  unsigned long nbytes)
 {
@@ -1029,10 +1028,6 @@ static inline int valid_irq_stack(unsigned long sp, struct task_struct *p,
 	}
 	return 0;
 }
-
-#else
-#define valid_irq_stack(sp, p, nb)	0
-#endif /* CONFIG_IRQSTACKS */
 
 int validate_sp(unsigned long sp, struct task_struct *p,
 		       unsigned long nbytes)
@@ -1270,7 +1265,7 @@ unsigned long randomize_et_dyn(unsigned long base)
 }
 
 #ifdef CONFIG_SMP
-int arch_sd_sibiling_asym_packing(void)
+int arch_sd_sibling_asym_packing(void)
 {
 	if (cpu_has_feature(CPU_FTR_ASYM_SMT)) {
 		printk_once(KERN_INFO "Enabling Asymmetric SMT scheduling\n");
