@@ -1,3 +1,4 @@
+#include <linux/rbtree.h>
 
 static void interval_rb_augment_cb(struct rb_node *node, void *__unused)
 {
