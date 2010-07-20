@@ -12,9 +12,9 @@ static void interval_rb_augment_cb(struct rb_node *node, void *__unused)
 	SET_MAX_END(node, max_end);
 }
 
-static rb_node *interval_insert(struct rb_root *root, struct rb_node *ins)
+static struct rb_node *interval_insert(struct rb_root *root, struct rb_node *ins)
 {
-	struct rb_node **node = &(root->ro_node), *parent = NULL;
+	struct rb_node **node = &(root->rb_node), *parent = NULL;
 
 	while (*node) {
 		parent = *node;
@@ -28,7 +28,7 @@ static rb_node *interval_insert(struct rb_root *root, struct rb_node *ins)
 			else if (END(ins) > END(*node))
 				node = &((*node)->rb_right);
 			else
-				return node;
+				return *node;
 		}
 	}
 
@@ -39,10 +39,10 @@ static rb_node *interval_insert(struct rb_root *root, struct rb_node *ins)
 	return ins;
 }
 
-static rb_node *interval_search_exact(struct rb_root *root,
+static struct rb_node *interval_search_exact(struct rb_root *root,
 		TYPE start, TYPE end)
 {
-	struct rb_node *node = root->ro_node;
+	struct rb_node *node = root->rb_node;
 
 	while (node) {
 		if (start < START(node)) {
@@ -114,7 +114,7 @@ static struct rb_node *interval_next_overlap(struct rb_node *node,
 	if (node->rb_right && MAX_END(node->rb_right) > start)
 		return __interval_first_overlap(node->rb_right, start, end);
 
-	while (parent = rb_parent(node)) {
+	while ((parent = rb_parent(node)) != NULL) {
 		if (node == parent->rb_right)
 			continue;
 		node = parent;

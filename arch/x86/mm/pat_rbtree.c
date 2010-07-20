@@ -36,94 +36,15 @@
 
 static struct rb_root memtype_rbroot = RB_ROOT;
 
-static int is_node_overlap(struct memtype *node, u64 start, u64 end)
-{
-	if (node->start >= end || node->end <= start)
-		return 0;
-
-	return 1;
-}
-
-static u64 get_subtree_max_end(struct rb_node *node)
-{
-	u64 ret = 0;
-	if (node) {
-		struct memtype *data = container_of(node, struct memtype, rb);
-		ret = data->subtree_max_end;
-	}
-	return ret;
-}
-
-/* Update 'subtree_max_end' for a node, based on node and its children */
-static void memtype_rb_augment_cb(struct rb_node *node, void *__unused)
-{
-	struct memtype *data;
-	u64 max_end, child_max_end;
-
-	if (!node)
-		return;
-
-	data = container_of(node, struct memtype, rb);
-	max_end = data->end;
-
-	child_max_end = get_subtree_max_end(node->rb_right);
-	if (child_max_end > max_end)
-		max_end = child_max_end;
-
-	child_max_end = get_subtree_max_end(node->rb_left);
-	if (child_max_end > max_end)
-		max_end = child_max_end;
-
-	data->subtree_max_end = max_end;
-}
-
-/* Find the first (lowest start addr) overlapping range from rb tree */
-static struct memtype *memtype_rb_lowest_match(struct rb_root *root,
-				u64 start, u64 end)
-{
-	struct rb_node *node = root->rb_node;
-	struct memtype *last_lower = NULL;
-
-	while (node) {
-		struct memtype *data = container_of(node, struct memtype, rb);
-
-		if (get_subtree_max_end(node->rb_left) > start) {
-			/* Lowest overlap if any must be on left side */
-			node = node->rb_left;
-		} else if (is_node_overlap(data, start, end)) {
-			last_lower = data;
-			break;
-		} else if (start >= data->start) {
-			/* Lowest overlap if any must be on right side */
-			node = node->rb_right;
-		} else {
-			break;
-		}
-	}
-	return last_lower; /* Returns NULL if there is no overlap */
-}
-
-static struct memtype *memtype_rb_exact_match(struct rb_root *root,
-				u64 start, u64 end)
-{
-	struct memtype *match;
-
-	match = memtype_rb_lowest_match(root, start, end);
-	while (match != NULL && match->start < end) {
-		struct rb_node *node;
-
-		if (match->start == start && match->end == end)
-			return match;
-
-		node = rb_next(&match->rb);
-		if (node)
-			match = container_of(node, struct memtype, rb);
-		else
-			match = NULL;
-	}
-
-	return NULL; /* Returns NULL if there is no exact match */
-}
+#define TYPE u64
+#define START(node) (container_of(node, struct memtype, rb)->start)
+#define END(node) (container_of(node, struct memtype, rb)->end)
+#define MAX_END(node) (container_of(node, struct memtype, rb)->subtree_max_end)
+#define SET_MAX_END(node, val) 						\
+	do {								\
+		container_of(node, struct memtype, rb)->subtree_max_end = val;\
+	} while (0)
+#include <linux/interval_tree_tmpl.h>
 
 static int memtype_rb_check_conflict(struct rb_root *root,
 				u64 start, u64 end,
@@ -133,30 +54,24 @@ static int memtype_rb_check_conflict(struct rb_root *root,
 	struct memtype *match;
 	int found_type = reqtype;
 
-	match = memtype_rb_lowest_match(&memtype_rbroot, start, end);
-	if (match == NULL)
+	node = interval_first_overlap(&memtype_rbroot, start, end);
+	if (node == NULL)
 		goto success;
 
+	match = container_of(node, struct memtype, rb);
 	if (match->type != found_type && newtype == NULL)
 		goto failure;
 
 	dprintk("Overlap at 0x%Lx-0x%Lx\n", match->start, match->end);
 	found_type = match->type;
 
-	node = rb_next(&match->rb);
-	while (node) {
+	while ((node = interval_next_overlap(node, start, end)) != NULL) {
 		match = container_of(node, struct memtype, rb);
 
-		if (match->start >= end) /* Checked all possible matches */
-			goto success;
-
-		if (is_node_overlap(match, start, end) &&
-		    match->type != found_type) {
+		if (match->type != found_type)
 			goto failure;
-		}
-
-		node = rb_next(&match->rb);
 	}
+
 success:
 	if (newtype)
 		*newtype = found_type;
@@ -170,29 +85,10 @@ failure:
 	return -EBUSY;
 }
 
-static void memtype_rb_insert(struct rb_root *root, struct memtype *newdata)
-{
-	struct rb_node **node = &(root->rb_node);
-	struct rb_node *parent = NULL;
-
-	while (*node) {
-		struct memtype *data = container_of(*node, struct memtype, rb);
-
-		parent = *node;
-		if (newdata->start <= data->start)
-			node = &((*node)->rb_left);
-		else if (newdata->start > data->start)
-			node = &((*node)->rb_right);
-	}
-
-	rb_link_node(&newdata->rb, parent, node);
-	rb_insert_color(&newdata->rb, root);
-	rb_augment_insert(&newdata->rb, memtype_rb_augment_cb, NULL);
-}
-
 int rbt_memtype_check_insert(struct memtype *new, unsigned long *ret_type)
 {
 	int err = 0;
+	struct rb_node *node;
 
 	err = memtype_rb_check_conflict(&memtype_rbroot, new->start, new->end,
 						new->type, ret_type);
@@ -201,33 +97,46 @@ int rbt_memtype_check_insert(struct memtype *new, unsigned long *ret_type)
 		if (ret_type)
 			new->type = *ret_type;
 
-		new->subtree_max_end = new->end;
-		memtype_rb_insert(&memtype_rbroot, new);
+		node = interval_insert(&memtype_rbroot, &new->rb);
+		if (node != &new->rb) {
+			/* insert duplicated */
+			struct rb_node **p = &node->rb_right;
+
+			while (*p) {
+				node = *p;
+				p = &node->rb_left;
+			}
+
+			rb_link_node(&new->rb, node, p);
+			rb_insert_color(&new->rb, &memtype_rbroot);
+			rb_augment_insert(&new->rb, interval_rb_augment_cb,
+					NULL);
+		}
 	}
 	return err;
 }
 
 struct memtype *rbt_memtype_erase(u64 start, u64 end)
 {
-	struct rb_node *deepest;
-	struct memtype *data;
+	struct rb_node *node;
 
-	data = memtype_rb_exact_match(&memtype_rbroot, start, end);
-	if (!data)
-		goto out;
+	node = interval_search_exact(&memtype_rbroot, start, end);
+	if (!node)
+		return NULL;
 
-	deepest = rb_augment_erase_begin(&data->rb);
-	rb_erase(&data->rb, &memtype_rbroot);
-	rb_augment_erase_end(deepest, memtype_rb_augment_cb, NULL);
-out:
-	return data;
+	interval_erase(&memtype_rbroot, node);
+
+	return container_of(node, struct memtype, rb);
 }
 
 struct memtype *rbt_memtype_lookup(u64 addr)
 {
-	struct memtype *data;
-	data = memtype_rb_lowest_match(&memtype_rbroot, addr, addr + PAGE_SIZE);
-	return data;
+	struct rb_node *node;
+
+	node = interval_first_overlap(&memtype_rbroot, addr, addr + PAGE_SIZE);
+	if (!node)
+		return NULL;
+	return container_of(node, struct memtype, rb);
 }
 
 #if defined(CONFIG_DEBUG_FS)
