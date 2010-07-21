@@ -12,7 +12,18 @@
  */
 
 #include <linux/mm.h>
-#include <linux/prio_tree.h>
+
+#define ENTRY(node) rb_entry(node, struct vm_area_struct, shared.interval_tree_node)
+#define TYPE pgoff_t
+#define START(node) (ENTRY(node)->vm_pgoff)
+#define END(node) (ENTRY(node)->vm_pgoff +			\
+		   ENTRY(node)->vm_end - ENTRY(node)->vm_start)
+#define MAX_END(node) (ENTRY(node)->vm_pg_max_end)
+#define SET_MAX_END(node, val)					\
+	do {							\
+		ENTRY(node)->vm_pg_max_end = val;		\
+	} while (0)
+#include <linux/interval_tree_tmpl.h>
 
 /*
  * See lib/interval_tree_tmpl.h for details on the general interval tree
@@ -104,7 +115,7 @@ void vma_interval_tree_remove(struct vm_area_struct *vma,
 		if (!vma->shared.vm_set.parent)
 			list_del_init(&vma->shared.vm_set.list);
 		else
-			interval_remove(root, &vma->shared.interval_tree_node);
+			interval_erase(root, &vma->shared.interval_tree_node);
 	} else {
 		/* Leave this BUG_ON till interval_tree patch stabilizes */
 		BUG_ON(vma->shared.vm_set.head->shared.vm_set.head != vma);
@@ -119,7 +130,7 @@ void vma_interval_tree_remove(struct vm_area_struct *vma,
 			} else
 				new_head = NULL;
 
-			rb_repalce_node(&vma->shared.interval_tree_node,
+			rb_replace_node(&vma->shared.interval_tree_node,
 					&head->shared.interval_tree_node, root);
 			head->shared.vm_set.head = new_head;
 			if (new_head)
@@ -156,7 +167,7 @@ struct vm_area_struct *vma_interval_tree_next(struct vm_area_struct *vma,
 		/*
 		 * First call is with NULL vma
 		 */
-		ptr = interval_fist_overlap(iter->root, iter->start, iter->end);
+		ptr = interval_first_overlap(iter->root, iter->start, iter->end);
 		if (ptr) {
 			next = container_of(ptr, struct vm_area_struct,
 					shared.interval_tree_node);

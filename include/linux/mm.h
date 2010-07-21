@@ -1206,16 +1206,39 @@ extern void zone_pcp_update(struct zone *zone);
 extern atomic_long_t mmap_pages_allocated;
 extern int nommu_shrink_inode_mappings(struct inode *, size_t, size_t);
 
-/* prio_tree.c */
-void vma_prio_tree_add(struct vm_area_struct *, struct vm_area_struct *old);
-void vma_prio_tree_insert(struct vm_area_struct *, struct prio_tree_root *);
-void vma_prio_tree_remove(struct vm_area_struct *, struct prio_tree_root *);
-struct vm_area_struct *vma_prio_tree_next(struct vm_area_struct *vma,
-	struct prio_tree_iter *iter);
+struct vma_interval_tree_iter {
+	struct rb_root *root;
+	struct rb_node *node;
+	pgoff_t start;
+	pgoff_t end;
+};
 
-#define vma_prio_tree_foreach(vma, iter, root, begin, end)	\
-	for (prio_tree_iter_init(iter, root, begin, end), vma = NULL;	\
-		(vma = vma_prio_tree_next(vma, iter)); )
+static inline
+void vma_interval_tree_iter_init(struct vma_interval_tree_iter *iter,
+		struct rb_root *root, pgoff_t start, pgoff_t end)
+{
+	iter->root = root;
+	iter->node = NULL;
+	iter->start = start;
+	iter->end = end;
+}
+
+/* mapping_interval_tree.c */
+void vma_interval_tree_add(struct vm_area_struct *, struct vm_area_struct *old);
+void vma_interval_tree_insert(struct vm_area_struct *, struct rb_root *);
+void vma_interval_tree_remove(struct vm_area_struct *, struct rb_root *);
+struct vm_area_struct *vma_interval_tree_next(struct vm_area_struct *vma,
+	struct vma_interval_tree_iter *iter);
+
+#define vma_interval_tree_foreach(vma, iter, root, begin, end)		\
+	for (vma_interval_iter_init(iter, root, begin, end), vma = NULL;\
+		(vma = vma_interval_tree_next(vma, iter)); )
+
+#define vma_prio_tree_add vma_interval_tree_add
+#define vma_prio_tree_insert vma_interval_tree_insert
+#define vma_prio_tree_remove vma_interval_tree_remove
+#define vma_prio_tree_next vma_interval_tree_next
+#define vma_prio_tree_foreach(v,i,r,b,e) vma_interval_tree_foreach(v,i,r,b,e+1)
 
 static inline void vma_nonlinear_insert(struct vm_area_struct *vma,
 					struct list_head *list)

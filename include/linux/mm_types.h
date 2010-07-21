@@ -149,12 +149,12 @@ struct vm_area_struct {
 	 */
 	union {
 		struct {
+			void *parent;	/* aligns with rb_node parent */
 			struct list_head list;
-			void *parent;	/* aligns with prio_tree_node parent */
 			struct vm_area_struct *head;
 		} vm_set;
 
-		struct raw_prio_tree_node prio_tree_node;
+		struct rb_node interval_tree_node;
 	} shared;
 
 	/*
@@ -176,6 +176,7 @@ struct vm_area_struct {
 	struct file * vm_file;		/* File we map to (can be NULL). */
 	void * vm_private_data;		/* was vm_pte (shared mem) */
 	unsigned long vm_truncate_count;/* truncate_count or restart_addr */
+	unsigned long vm_pg_max_end;	/* Track mapping subtree's max end */
 
 #ifndef CONFIG_MMU
 	struct vm_region *vm_region;	/* NOMMU mapping region */

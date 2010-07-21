@@ -2384,19 +2384,19 @@ unwritable_page:
  *
  * __ Notes on dropping i_mmap_lock to reduce latency while unmapping __
  *
- * We have to restart searching the prio_tree whenever we drop the lock,
+ * We have to restart searching the interval_tree whenever we drop the lock,
  * since the iterator is only valid while the lock is held, and anyway
  * a later vma might be split and reinserted earlier while lock dropped.
  *
  * The list of nonlinear vmas could be handled more efficiently, using
  * a placeholder, but handle it in the same way until a need is shown.
- * It is important to search the prio_tree before nonlinear list: a vma
- * may become nonlinear and be shifted from prio_tree to nonlinear list
- * while the lock is dropped; but never shifted from list to prio_tree.
+ * It is important to search the interval_tree before nonlinear list: a vma
+ * may become nonlinear and be shifted from interval_tree to nonlinear list
+ * while the lock is dropped; but never shifted from list to interval_tree.
  *
  * In order to make forward progress despite restarting the search,
  * vm_truncate_count is used to mark a vma as now dealt with, so we can
- * quickly skip it next time around.  Since the prio_tree search only
+ * quickly skip it next time around.  Since the interval_tree search only
  * shows us those vmas affected by unmapping the range in question, we
  * can't efficiently keep all vmas in step with mapping->truncate_count:
  * so instead reset them all whenever it wraps back to 0 (then go to 1).
@@ -2416,9 +2416,9 @@ unwritable_page:
 static void reset_vma_truncate_counts(struct address_space *mapping)
 {
 	struct vm_area_struct *vma;
-	struct prio_tree_iter iter;
+	struct vma_interval_tree_iter iter;
 
-	vma_prio_tree_foreach(vma, &iter, &mapping->i_mmap, 0, ULONG_MAX)
+	vma_interval_tree_foreach(vma, &iter, &mapping->i_mmap, 0, ULONG_MAX)
 		vma->vm_truncate_count = 0;
 	list_for_each_entry(vma, &mapping->i_mmap_nonlinear, shared.vm_set.list)
 		vma->vm_truncate_count = 0;
@@ -2471,15 +2471,15 @@ again:
 	return -EINTR;
 }
 
-static inline void unmap_mapping_range_tree(struct prio_tree_root *root,
+static inline void unmap_mapping_range_tree(struct rb_root *root,
 					    struct zap_details *details)
 {
 	struct vm_area_struct *vma;
-	struct prio_tree_iter iter;
+	struct vma_interval_tree_iter iter;
 	pgoff_t vba, vea, zba, zea;
 
 restart:
-	vma_prio_tree_foreach(vma, &iter, root,
+	vma_interval_tree_foreach(vma, &iter, root,
 			details->first_index, details->last_index) {
 		/* Skip quickly over those we have already dealt with */
 		if (vma->vm_truncate_count == details->truncate_count)
@@ -2574,7 +2574,7 @@ void unmap_mapping_range(struct address_space *mapping,
 	}
 	details.truncate_count = mapping->truncate_count;
 
-	if (unlikely(!prio_tree_empty(&mapping->i_mmap)))
+	if (unlikely(mapping->i_mmap.rb_node))
 		unmap_mapping_range_tree(&mapping->i_mmap, &details);
 	if (unlikely(!list_empty(&mapping->i_mmap_nonlinear)))
 		unmap_mapping_range_list(&mapping->i_mmap_nonlinear, &details);
