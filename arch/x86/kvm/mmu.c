@@ -204,7 +204,7 @@ static u64 __read_mostly shadow_dirty_mask;
 
 static inline u64 rsvd_bits(int s, int e)
 {
-	return ((1ULL << (e - s + 1)) - 1) << s;
+	return (1ULL << (e + 1)) - (1ULL << s);
 }
 
 void kvm_mmu_set_nonpresent_ptes(u64 trap_pte, u64 notrap_pte)
