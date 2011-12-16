@@ -94,7 +94,7 @@ static bool vnc;
 static bool sdl;
 static bool balloon;
 static bool using_rootfs;
-static bool custom_rootfs;
+static const char *custom_rootfs;
 static bool no_net;
 static bool no_dhcp;
 extern bool ioport_debug;
@@ -156,7 +156,8 @@ static int img_name_parser(const struct option *opt, const char *arg, int unset)
 		if (virtio_9p__register(kvm, "/", "hostfs") < 0)
 			die("Unable to initialize virtio 9p");
 		kvm_setup_resolv(arg);
-		using_rootfs = custom_rootfs = 1;
+		using_rootfs = 1;
+		custom_rootfs = arg;
 		return 0;
 	}
 
@@ -741,13 +742,9 @@ void kvm_run_help(void)
 	usage_with_options(run_usage, options);
 }
 
-static int kvm_run_set_sandbox(void)
+static int kvm_run_set_sandbox(const char *guestfs_name)
 {
-	const char *guestfs_name = "default";
 	char path[PATH_MAX], script[PATH_MAX], *tmp;
-
-	if (image_filename[0])
-		guestfs_name = image_filename[0];
 
 	snprintf(path, PATH_MAX, "%s%s/virt/sandbox.sh", kvm__get_dir(), guestfs_name);
 
@@ -962,13 +959,14 @@ int kvm_cmd_run(int argc, const char **argv, const char *prefix)
 			die("Unable to initialize virtio 9p");
 		if (virtio_9p__register(kvm, "/", "hostfs") < 0)
 			die("Unable to initialize virtio 9p");
-		using_rootfs = custom_rootfs = 1;
+		using_rootfs = 1;
+		custom_rootfs = "default";
 	}
 
 	if (using_rootfs) {
 		strcat(real_cmdline, " root=/dev/root rw rootflags=rw,trans=virtio,version=9p2000.L rootfstype=9p");
 		if (custom_rootfs) {
-			kvm_run_set_sandbox();
+			kvm_run_set_sandbox(custom_rootfs);
 
 			strcat(real_cmdline, " init=/virt/init");
 
