@@ -132,6 +132,16 @@ static int copy_init(const char *guestfs_name)
 	return copy_file("guest/init", path);
 }
 
+static int copy_init_stage2(const char *guestfs_name)
+{
+	char path[PATH_MAX];
+
+	snprintf(path, PATH_MAX, "%s%s/virt/init_stage2", kvm__get_dir(),
+			guestfs_name);
+
+	return copy_file("guest/init_stage2", path);
+}
+
 static int copy_passwd(const char *guestfs_name)
 {
 	char path[PATH_MAX];
@@ -197,6 +207,10 @@ static int do_setup(const char *guestfs_name)
 	}
 
 	ret = copy_init(guestfs_name);
+	if (ret < 0)
+		return ret;
+
+	ret = copy_init_stage2(guestfs_name);
 	if (ret < 0)
 		return ret;
 
