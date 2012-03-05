@@ -254,12 +254,12 @@ EXPORT_SYMBOL_GPL(__srcu_read_unlock);
  * we repeatedly block for 1-millisecond time periods.  This approach
  * has done well in testing, so there is no need for a config parameter.
  */
-#define SYNCHRONIZE_SRCU_READER_DELAY 5
+#define SYNCHRONIZE_SRCU_READER_DELAY	5
+#define SYNCHRONIZE_SRCU_TRYCOUNT	2
+#define SYNCHRONIZE_SRCU_EXP_TRYCOUNT	12
 
-static void wait_idx(struct srcu_struct *sp, int idx, bool expedited)
+static void wait_idx(struct srcu_struct *sp, int idx, int trycount)
 {
-	int trycount = 0;
-
 	/*
 	 * If a reader fetches the index before the ->completed increment,
 	 * but increments its counter after srcu_readers_active_idx_check()
@@ -278,9 +278,10 @@ static void wait_idx(struct srcu_struct *sp, int idx, bool expedited)
 	if (!srcu_readers_active_idx_check(sp, idx)) {
 		udelay(SYNCHRONIZE_SRCU_READER_DELAY);
 		while (!srcu_readers_active_idx_check(sp, idx)) {
-			if (expedited && ++ trycount < 10)
+			if (trycount > 0) {
+				trycount--;
 				udelay(SYNCHRONIZE_SRCU_READER_DELAY);
-			else
+			} else
 				schedule_timeout_interruptible(1);
 		}
 	}
@@ -310,18 +311,18 @@ static void wait_idx(struct srcu_struct *sp, int idx, bool expedited)
  * by the next __synchronize_srcu() invoking wait_idx() for such readers
  * before starting a new grace period.
  */
-static void flip_idx_and_wait(struct srcu_struct *sp, bool expedited)
+static void flip_idx_and_wait(struct srcu_struct *sp, int trycount)
 {
 	int idx;
 
 	idx = sp->completed++ & 0x1;
-	wait_idx(sp, idx, expedited);
+	wait_idx(sp, idx, trycount);
 }
 
 /*
  * Helper function for synchronize_srcu() and synchronize_srcu_expedited().
  */
-static void __synchronize_srcu(struct srcu_struct *sp, bool expedited)
+static void __synchronize_srcu(struct srcu_struct *sp, int trycount)
 {
 	rcu_lockdep_assert(!lock_is_held(&sp->dep_map) &&
 			   !lock_is_held(&rcu_bh_lock_map) &&
@@ -357,14 +358,14 @@ static void __synchronize_srcu(struct srcu_struct *sp, bool expedited)
 	 * fetching ->completed and incrementing their counter, wait_idx()
 	 * will normally not need to wait.
 	 */
-	wait_idx(sp, (sp->completed - 1) & 0x1, expedited);
+	wait_idx(sp, (sp->completed - 1) & 0x1, trycount);
 
 	/*
 	 * Now that wait_idx() has waited for the really old readers,
 	 * invoke flip_idx_and_wait() to flip the counter and wait
 	 * for current SRCU readers.
 	 */
-	flip_idx_and_wait(sp, expedited);
+	flip_idx_and_wait(sp, trycount);
 
 	mutex_unlock(&sp->mutex);
 }
@@ -385,7 +386,7 @@ static void __synchronize_srcu(struct srcu_struct *sp, bool expedited)
  */
 void synchronize_srcu(struct srcu_struct *sp)
 {
-	__synchronize_srcu(sp, 0);
+	__synchronize_srcu(sp, SYNCHRONIZE_SRCU_TRYCOUNT);
 }
 EXPORT_SYMBOL_GPL(synchronize_srcu);
 
@@ -406,7 +407,7 @@ EXPORT_SYMBOL_GPL(synchronize_srcu);
  */
 void synchronize_srcu_expedited(struct srcu_struct *sp)
 {
-	__synchronize_srcu(sp, 1);
+	__synchronize_srcu(sp, SYNCHRONIZE_SRCU_EXP_TRYCOUNT);
 }
 EXPORT_SYMBOL_GPL(synchronize_srcu_expedited);
 
