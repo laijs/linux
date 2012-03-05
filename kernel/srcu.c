@@ -300,23 +300,12 @@ static void wait_idx(struct srcu_struct *sp, int idx, int trycount)
 }
 
 /*
- * Flip the readers' index by incrementing ->completed, then wait
- * until there are no more readers using the counters referenced by
- * the old index value.  (Recall that the index is the bottom bit
- * of ->completed.)
- *
- * Of course, it is possible that a reader might be delayed for the
- * full duration of flip_idx_and_wait() between fetching the
- * index and incrementing its counter.  This possibility is handled
- * by the next __synchronize_srcu() invoking wait_idx() for such readers
- * before starting a new grace period.
+ * Flip the readers' index by incrementing ->completed, then new
+ * readers will use counters referenced on new index value.
  */
-static void flip_idx_and_wait(struct srcu_struct *sp, int trycount)
+static void srcu_flip(struct srcu_struct *sp)
 {
-	int idx;
-
-	idx = sp->completed++ & 0x1;
-	wait_idx(sp, idx, trycount);
+	ACCESS_ONCE(sp->completed)++;
 }
 
 /*
@@ -362,10 +351,20 @@ static void __synchronize_srcu(struct srcu_struct *sp, int trycount)
 
 	/*
 	 * Now that wait_idx() has waited for the really old readers,
-	 * invoke flip_idx_and_wait() to flip the counter and wait
-	 * for current SRCU readers.
+	 *
+	 * Flip the readers' index by incrementing ->completed, then wait
+	 * until there are no more readers using the counters referenced by
+	 * the old index value.  (Recall that the index is the bottom bit
+	 * of ->completed.)
+	 *
+	 * Of course, it is possible that a reader might be delayed for the
+	 * full duration of flip_idx_and_wait() between fetching the
+	 * index and incrementing its counter.  This possibility is handled
+	 * by the next __synchronize_srcu() invoking wait_idx() for such
+	 * readers before starting a new grace period.
 	 */
-	flip_idx_and_wait(sp, trycount);
+	srcu_flip(sp);
+	wait_idx(sp, (sp->completed - 1) & 0x1, trycount);
 
 	mutex_unlock(&sp->mutex);
 }
