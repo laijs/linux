@@ -29,6 +29,22 @@
 
 #include <linux/mutex.h>
 #include <linux/rcupdate.h>
+#include <linux/workqueue.h>
+
+struct srcu_head;
+typedef void (*srcu_callback_func_t)(struct srcu_head *head);
+
+struct srcu_head {
+	union {
+		struct {
+			struct srcu_head *next;
+			/* the snap of sp->chck_seq when queued */
+			unsigned long chck_seq;
+			srcu_callback_func_t func;
+		};
+		struct work_struct work;
+	};
+};
 
 struct srcu_struct_array {
 	unsigned long c[2];
@@ -39,10 +55,32 @@ struct srcu_struct_array {
 #define SRCU_REF_MASK		(ULONG_MAX >> SRCU_USAGE_BITS)
 #define SRCU_USAGE_COUNT	(SRCU_REF_MASK + 1)
 
+struct srcu_cpu_struct;
+
 struct srcu_struct {
 	unsigned completed;
+
+	/* the sequence of check zero */
+	unsigned long chck_seq;
+	/* the snap of chck_seq when the last callback is queued */
+	unsigned long callback_chck_seq;
+
+	/* the sequence value of succeed check(chck_seq) */
+	unsigned long zero_seq[2];
+
+	/* protects the above completed and sequence values */
+	spinlock_t gp_lock;
+
+	/* protects all the fields here except callback_chck_seq */
+	struct mutex flip_check_mutex;
+	/*
+	 * Fileds of the intersection of gp_lock-protected fields and
+	 * flip_check_mutex-protected fields can only be modified with
+	 * the two lock are both held, can be read with one of lock held.
+	 */
+
 	struct srcu_struct_array __percpu *per_cpu_ref;
-	struct mutex mutex;
+	struct srcu_cpu_struct __percpu *srcu_per_cpu;
 	unsigned long snap[NR_CPUS];
 #ifdef CONFIG_DEBUG_LOCK_ALLOC
 	struct lockdep_map dep_map;
@@ -236,4 +274,7 @@ static inline void srcu_read_unlock_raw(struct srcu_struct *sp, int idx)
 	local_irq_restore(flags);
 }
 
+void call_srcu(struct srcu_struct *sp, struct srcu_head *head,
+		srcu_callback_func_t func);
+void srcu_barrier(struct srcu_struct *sp);
 #endif
