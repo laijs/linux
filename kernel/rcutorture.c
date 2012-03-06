@@ -148,7 +148,10 @@ static struct task_struct *barrier_task;
 #define RCU_TORTURE_PIPE_LEN 10
 
 struct rcu_torture {
-	struct rcu_head rtort_rcu;
+	union {
+		struct rcu_head rtort_rcu;
+		struct srcu_head rtort_srcu;
+	};
 	int rtort_pipe_count;
 	struct list_head rtort_free;
 	int rtort_mbtest;
@@ -388,10 +391,9 @@ static int rcu_torture_completed(void)
 }
 
 static void
-rcu_torture_cb(struct rcu_head *p)
+__rcu_torture_cb(struct rcu_torture *rp)
 {
 	int i;
-	struct rcu_torture *rp = container_of(p, struct rcu_torture, rtort_rcu);
 
 	if (fullstop != FULLSTOP_DONTSTOP) {
 		/* Test is ending, just drop callbacks on the floor. */
@@ -407,6 +409,14 @@ rcu_torture_cb(struct rcu_head *p)
 		rcu_torture_free(rp);
 	} else
 		cur_ops->deferred_free(rp);
+}
+
+static void
+rcu_torture_cb(struct rcu_head *p)
+{
+	struct rcu_torture *rp = container_of(p, struct rcu_torture, rtort_rcu);
+
+	__rcu_torture_cb(rp);
 }
 
 static int rcu_no_completed(void)
@@ -623,6 +633,19 @@ static int srcu_torture_completed(void)
 	return srcu_batches_completed(&srcu_ctl);
 }
 
+static void
+srcu_torture_cb(struct srcu_head *p)
+{
+	struct rcu_torture *rp = container_of(p, struct rcu_torture, rtort_srcu);
+
+	__rcu_torture_cb(rp);
+}
+
+static void srcu_torture_deferred_free(struct rcu_torture *rp)
+{
+	call_srcu(&srcu_ctl, &rp->rtort_srcu, srcu_torture_cb);
+}
+
 static void srcu_torture_synchronize(void)
 {
 	synchronize_srcu(&srcu_ctl);
@@ -652,12 +675,27 @@ static struct rcu_torture_ops srcu_ops = {
 	.read_delay	= srcu_read_delay,
 	.readunlock	= srcu_torture_read_unlock,
 	.completed	= srcu_torture_completed,
-	.deferred_free	= rcu_sync_torture_deferred_free,
+	.deferred_free	= srcu_torture_deferred_free,
 	.sync		= srcu_torture_synchronize,
 	.call		= NULL,
 	.cb_barrier	= NULL,
 	.stats		= srcu_torture_stats,
 	.name		= "srcu"
+};
+
+static struct rcu_torture_ops srcu_sync_ops = {
+	.init		= srcu_torture_init,
+	.cleanup	= srcu_torture_cleanup,
+	.readlock	= srcu_torture_read_lock,
+	.read_delay	= srcu_read_delay,
+	.readunlock	= srcu_torture_read_unlock,
+	.completed	= srcu_torture_completed,
+	.deferred_free	= rcu_sync_torture_deferred_free,
+	.sync		= srcu_torture_synchronize,
+	.call		= NULL,
+	.cb_barrier	= NULL,
+	.stats		= srcu_torture_stats,
+	.name		= "srcu_sync"
 };
 
 static int srcu_torture_read_lock_raw(void) __acquires(&srcu_ctl)
@@ -677,12 +715,27 @@ static struct rcu_torture_ops srcu_raw_ops = {
 	.read_delay	= srcu_read_delay,
 	.readunlock	= srcu_torture_read_unlock_raw,
 	.completed	= srcu_torture_completed,
-	.deferred_free	= rcu_sync_torture_deferred_free,
+	.deferred_free	= srcu_torture_deferred_free,
 	.sync		= srcu_torture_synchronize,
 	.call		= NULL,
 	.cb_barrier	= NULL,
 	.stats		= srcu_torture_stats,
 	.name		= "srcu_raw"
+};
+
+static struct rcu_torture_ops srcu_raw_sync_ops = {
+	.init		= srcu_torture_init,
+	.cleanup	= srcu_torture_cleanup,
+	.readlock	= srcu_torture_read_lock_raw,
+	.read_delay	= srcu_read_delay,
+	.readunlock	= srcu_torture_read_unlock_raw,
+	.completed	= srcu_torture_completed,
+	.deferred_free	= rcu_sync_torture_deferred_free,
+	.sync		= srcu_torture_synchronize,
+	.call		= NULL,
+	.cb_barrier	= NULL,
+	.stats		= srcu_torture_stats,
+	.name		= "srcu_raw_sync"
 };
 
 static void srcu_torture_synchronize_expedited(void)
@@ -1673,7 +1726,7 @@ static int rcu_torture_barrier_init(void)
 	for (i = 0; i < n_barrier_cbs; i++) {
 		init_waitqueue_head(&barrier_cbs_wq[i]);
 		barrier_cbs_tasks[i] = kthread_run(rcu_torture_barrier_cbs,
-						   (void *)i,
+						   (void *)(long)i,
 						   "rcu_torture_barrier_cbs");
 		if (IS_ERR(barrier_cbs_tasks[i])) {
 			ret = PTR_ERR(barrier_cbs_tasks[i]);
@@ -1857,7 +1910,8 @@ rcu_torture_init(void)
 	static struct rcu_torture_ops *torture_ops[] =
 		{ &rcu_ops, &rcu_sync_ops, &rcu_expedited_ops,
 		  &rcu_bh_ops, &rcu_bh_sync_ops, &rcu_bh_expedited_ops,
-		  &srcu_ops, &srcu_raw_ops, &srcu_expedited_ops,
+		  &srcu_ops, &srcu_sync_ops, &srcu_raw_ops,
+		  &srcu_raw_sync_ops, &srcu_expedited_ops,
 		  &sched_ops, &sched_sync_ops, &sched_expedited_ops, };
 
 	mutex_lock(&fullstop_mutex);
