@@ -222,7 +222,7 @@ extern void rcu_irq_exit(void);
  * TREE_RCU and rcu_barrier_() primitives in TINY_RCU.
  */
 
-typedef void call_rcu_func_t(struct rcu_head *head,
+typedef void (*call_rcu_func_t)(struct rcu_head *head,
 			     void (*func)(struct rcu_head *head));
 void wait_rcu_gp(call_rcu_func_t crf);
 

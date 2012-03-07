@@ -45,6 +45,7 @@
 #include <linux/mutex.h>
 #include <linux/export.h>
 #include <linux/hardirq.h>
+#include <linux/srcu.h>
 
 #define CREATE_TRACE_POINTS
 #include <trace/events/rcu.h>
@@ -123,19 +124,38 @@ static void wakeme_after_rcu(struct rcu_head  *head)
 	complete(&rcu->completion);
 }
 
-void wait_rcu_gp(call_rcu_func_t crf)
+static void __wait_rcu_gp(void *domain, void *func)
 {
 	struct rcu_synchronize rcu;
 
 	init_rcu_head_on_stack(&rcu.head);
 	init_completion(&rcu.completion);
+
 	/* Will wake me after RCU finished. */
-	crf(&rcu.head, wakeme_after_rcu);
+	if (!domain) {
+		call_rcu_func_t crf = func;
+		crf(&rcu.head, wakeme_after_rcu);
+	} else {
+		call_srcu_func_t crf = func;
+		crf(domain, &rcu.head, wakeme_after_rcu);
+	}
+
 	/* Wait for it. */
 	wait_for_completion(&rcu.completion);
 	destroy_rcu_head_on_stack(&rcu.head);
 }
+
+void wait_rcu_gp(call_rcu_func_t crf)
+{
+	__wait_rcu_gp(NULL, crf);
+}
 EXPORT_SYMBOL_GPL(wait_rcu_gp);
+
+/* srcu.c internel */
+void __wait_srcu_gp(struct srcu_struct *sp, call_srcu_func_t crf)
+{
+	__wait_rcu_gp(sp, crf);
+}
 
 #ifdef CONFIG_PROVE_RCU
 /*
