@@ -309,7 +309,6 @@ EXPORT_SYMBOL(kunmap_high);
  */
 struct page_address_map {
 	struct page *page;
-	void *virtual;
 	struct list_head list;
 };
 
@@ -339,6 +338,7 @@ void *page_address(const struct page *page)
 	unsigned long flags;
 	void *ret;
 	struct page_address_slot *pas;
+	struct page_address_map *pam;
 
 	if (!PageHighMem(page))
 		return lowmem_page_address(page);
@@ -346,18 +346,14 @@ void *page_address(const struct page *page)
 	pas = page_slot(page);
 	ret = NULL;
 	spin_lock_irqsave(&pas->lock, flags);
-	if (!list_empty(&pas->lh)) {
-		struct page_address_map *pam;
-
-		list_for_each_entry(pam, &pas->lh, list) {
-			if (pam->page == page) {
-				ret = pam->virtual;
-				goto done;
-			}
+	list_for_each_entry(pam, &pas->lh, list) {
+		if (pam->page == page) {
+			ret = (void *)PKMAP_ADDR(pam - page_address_maps);
+			break;
 		}
 	}
-done:
 	spin_unlock_irqrestore(&pas->lock, flags);
+
 	return ret;
 }
 
@@ -370,7 +366,6 @@ static void set_high_page_map(struct page *page, unsigned int nr)
 	struct page_address_map *pam = &page_address_maps[nr];
 
 	pam->page = page;
-	pam->virtual = (void *)PKMAP_ADDR(nr);
 
 	spin_lock_irqsave(&pas->lock, flags);
 	list_add_tail(&pam->list, &pas->lh);
