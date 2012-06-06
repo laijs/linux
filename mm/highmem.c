@@ -35,14 +35,6 @@ DEFINE_PER_CPU(int, __kmap_atomic_idx);
 EXPORT_PER_CPU_SYMBOL(__kmap_atomic_idx);
 #endif
 
-/*
- * Virtual_count is not a pure "count".
- *  0 means that it is not mapped, and has not been mapped
- *    since a TLB flush - it is usable.
- *  1 means that there are no users, but it has been mapped
- *    since the last TLB flush - so we can't use it.
- *  n means that there are (n-1) current users of it.
- */
 #ifdef CONFIG_HIGHMEM
 
 unsigned long totalhigh_pages __read_mostly;
@@ -65,6 +57,14 @@ unsigned int nr_free_highpages (void)
 	return pages;
 }
 
+/*
+ * pkmap_count is not a pure "count".
+ *  0 means that it is not mapped, and has not been mapped
+ *    since a TLB flush - it is usable.
+ *  1 means that there are no users, but it has been mapped
+ *    since the last TLB flush - so we can't use it.
+ *  n means that there are (n-1) current users of it.
+ */
 static int pkmap_count[LAST_PKMAP];
 static unsigned int last_pkmap_nr;
 static  __cacheline_aligned_in_smp DEFINE_SPINLOCK(kmap_lock);
