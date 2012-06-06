@@ -92,6 +92,8 @@ static DECLARE_WAIT_QUEUE_HEAD(pkmap_map_wait);
 		do { spin_unlock(&kmap_lock); (void)(flags); } while (0)
 #endif
 
+static void set_high_page_address(struct page *page, void *virtual);
+
 static void flush_all_zero_pkmaps(void)
 {
 	int i;
@@ -126,7 +128,7 @@ static void flush_all_zero_pkmaps(void)
 		pte_clear(&init_mm, (unsigned long)page_address(page),
 			  &pkmap_page_table[i]);
 
-		set_page_address(page, NULL);
+		set_high_page_address(page, NULL);
 		need_flush = 1;
 	}
 	if (need_flush)
@@ -188,7 +190,7 @@ start:
 		   &(pkmap_page_table[last_pkmap_nr]), mk_pte(page, kmap_prot));
 
 	pkmap_count[last_pkmap_nr] = 1;
-	set_page_address(page, (void *)vaddr);
+	set_high_page_address(page, (void *)vaddr);
 
 	return vaddr;
 }
@@ -365,11 +367,11 @@ done:
 EXPORT_SYMBOL(page_address);
 
 /**
- * set_page_address - set a page's virtual address
+ * set_high_page_address - set a page's virtual address
  * @page: &struct page to set
  * @virtual: virtual address to use
  */
-void set_page_address(struct page *page, void *virtual)
+static void set_high_page_address(struct page *page, void *virtual)
 {
 	unsigned long flags;
 	struct page_address_slot *pas;
