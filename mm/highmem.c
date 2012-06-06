@@ -103,8 +103,6 @@ static void flush_all_zero_pkmaps(void)
 	flush_cache_kmaps();
 
 	for (i = 0; i < LAST_PKMAP; i++) {
-		struct page *page;
-
 		/*
 		 * zero means we don't have anything to do,
 		 * >1 means that it is still in use. Only
@@ -125,9 +123,7 @@ static void flush_all_zero_pkmaps(void)
 		 * getting the kmap_lock (which is held here).
 		 * So no dangers, even with speculative execution.
 		 */
-		page = pte_page(pkmap_page_table[i]);
-		pte_clear(&init_mm, (unsigned long)page_address(page),
-			  &pkmap_page_table[i]);
+		pte_clear(&init_mm, PKMAP_ADDR(i), &pkmap_page_table[i]);
 
 		clear_high_page_map(i);
 		need_flush = 1;
