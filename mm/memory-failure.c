@@ -1367,6 +1367,7 @@ static struct page *new_page(struct page *p, unsigned long private, int **x)
 static int get_any_page(struct page *p, unsigned long pfn, int flags)
 {
 	int ret;
+	int mt;
 
 	if (flags & MF_COUNT_INCREASED)
 		return 1;
@@ -1376,6 +1377,11 @@ static int get_any_page(struct page *p, unsigned long pfn, int flags)
 	 * This is a big hammer, a better would be nicer.
 	 */
 	lock_memory_hotplug();
+
+	/* Don't move page of stable type to MIGRATE_MOVABLE */
+	mt = get_pageblock_migratetype(p);
+	if (!is_migrate_stable(mt))
+		mt = MIGRATE_MOVABLE;
 
 	/*
 	 * Isolate the page, so that it doesn't get reallocated if it
@@ -1404,7 +1410,7 @@ static int get_any_page(struct page *p, unsigned long pfn, int flags)
 		/* Not a free page */
 		ret = 1;
 	}
-	unset_migratetype_isolate(p, MIGRATE_MOVABLE);
+	unset_migratetype_isolate(p, mt);
 	unlock_memory_hotplug();
 	return ret;
 }

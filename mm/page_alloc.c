@@ -667,7 +667,7 @@ static void free_pcppages_bulk(struct zone *zone, int count,
 			page = list_entry(list->prev, struct page, lru);
 			/* must delete as __free_one_page list manipulates */
 			list_del(&page->lru);
-			/* MIGRATE_MOVABLE list may include MIGRATE_RESERVEs */
+			/* MIGRATE_MOVABLE list may include other types */
 			__free_one_page(page, zone, 0, page_private(page));
 			trace_mm_page_pcpu_drain(page, 0, page_private(page));
 		} while (--to_free && --batch_free && !list_empty(list));
@@ -1058,6 +1058,14 @@ static struct page *__rmqueue(struct zone *zone, unsigned int order,
 {
 	struct page *page;
 
+#ifdef CONFIG_MEMORY_HOTREMOVE
+	if (migratetype == MIGRATE_MOVABLE) {
+		page = __rmqueue_smallest(zone, order, MIGRATE_HOTREMOVE);
+		if (likely(page))
+			goto done;
+	}
+#endif
+
 	page = __rmqueue_smallest(zone, order, migratetype);
 
 #ifdef CONFIG_CMA
@@ -1071,6 +1079,7 @@ static struct page *__rmqueue(struct zone *zone, unsigned int order,
 	if (unlikely(!page))
 		page = __rmqueue_smallest(zone, order, MIGRATE_RESERVE);
 
+done:
 	trace_mm_page_alloc_zone_locked(page, order, migratetype);
 	return page;
 }
@@ -1105,11 +1114,7 @@ static int rmqueue_bulk(struct zone *zone, unsigned int order,
 			list_add(&page->lru, list);
 		else
 			list_add_tail(&page->lru, list);
-		if (IS_ENABLED(CONFIG_CMA)) {
-			mt = get_pageblock_migratetype(page);
-			if (!is_migrate_cma(mt) && mt != MIGRATE_ISOLATE)
-				mt = migratetype;
-		}
+		mt = get_pageblock_migratetype(page);
 		set_page_private(page, mt);
 		list = &page->lru;
 	}
@@ -1392,7 +1397,7 @@ int split_free_page(struct page *page)
 		struct page *endpage = page + (1 << order) - 1;
 		for (; page < endpage; page += pageblock_nr_pages) {
 			int mt = get_pageblock_migratetype(page);
-			if (mt != MIGRATE_ISOLATE && !is_migrate_cma(mt))
+			if (mt != MIGRATE_ISOLATE && !is_migrate_stable(mt))
 				set_pageblock_migratetype(page,
 							  MIGRATE_MOVABLE);
 		}
@@ -5465,7 +5470,7 @@ __count_immobile_pages(struct zone *zone, struct page *page, int count)
 	if (zone_idx(zone) == ZONE_MOVABLE)
 		return true;
 	mt = get_pageblock_migratetype(page);
-	if (mt == MIGRATE_MOVABLE || is_migrate_cma(mt))
+	if (is_migrate_movable(mt))
 		return true;
 
 	pfn = page_to_pfn(page);

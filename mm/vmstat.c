@@ -616,6 +616,9 @@ static char * const migratetype_names[MIGRATE_TYPES] = {
 #ifdef CONFIG_CMA
 	"CMA",
 #endif
+#ifdef CONFIG_MEMORY_HOTREMOVE
+	"Hotremove",
+#endif
 	"Isolate",
 };
 

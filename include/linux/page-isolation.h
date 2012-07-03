@@ -15,7 +15,7 @@ start_isolate_page_range(unsigned long start_pfn, unsigned long end_pfn,
 			 unsigned migratetype);
 
 /*
- * Changes MIGRATE_ISOLATE to MIGRATE_MOVABLE.
+ * Changes MIGRATE_ISOLATE to migratetype.
  * target range is [start_pfn, end_pfn)
  */
 extern int

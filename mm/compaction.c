@@ -47,7 +47,7 @@ static void map_pages(struct list_head *list)
 
 static inline bool migrate_async_suitable(int migratetype)
 {
-	return is_migrate_cma(migratetype) || migratetype == MIGRATE_MOVABLE;
+	return is_migrate_movable(migratetype);
 }
 
 /*
@@ -375,8 +375,8 @@ static bool suitable_migration_target(struct page *page)
 	if (PageBuddy(page) && page_order(page) >= pageblock_order)
 		return true;
 
-	/* If the block is MIGRATE_MOVABLE or MIGRATE_CMA, allow migration */
-	if (migrate_async_suitable(migratetype))
+	/* If the block is movable, allow migration */
+	if (is_migrate_movable(migratetype))
 		return true;
 
 	/* Otherwise skip the block */

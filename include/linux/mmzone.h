@@ -58,6 +58,15 @@ enum {
 	 */
 	MIGRATE_CMA,
 #endif
+#ifdef CONFIG_MEMORY_HOTREMOVE
+	/*
+	 * MIGRATE_HOTREMOVE migration type is designed to mimic the way
+	 * ZONE_MOVABLE works.  Only movable pages can be allocated
+	 * from MIGRATE_HOTREMOVE pageblocks and page allocator never
+	 * implicitly change migration type of MIGRATE_HOTREMOVE pageblock.
+	 */
+	MIGRATE_HOTREMOVE,
+#endif
 	MIGRATE_ISOLATE,	/* can't allocate from here */
 	MIGRATE_TYPES
 };
@@ -69,6 +78,31 @@ enum {
 #  define is_migrate_cma(migratetype) false
 #  define cma_wmark_pages(zone) 0
 #endif
+
+#ifdef CONFIG_MEMORY_HOTREMOVE
+#define is_migrate_hotremove(migratetype) ((migratetype) == MIGRATE_HOTREMOVE)
+#else
+#define is_migrate_hotremove(migratetype) false
+#endif
+
+/* Is it one of the movable types */
+static inline bool is_migrate_movable(int migratetype)
+{
+	return is_migrate_hotremove(migratetype) ||
+	       migratetype == MIGRATE_MOVABLE ||
+	       is_migrate_cma(migratetype);
+}
+
+/*
+ * Stable types: any page of the type can NOT be changed to
+ * the other type nor be moved to the other free list.
+ */
+static inline bool is_migrate_stable(int migratetype)
+{
+	return is_migrate_hotremove(migratetype) ||
+	       is_migrate_cma(migratetype) ||
+	       migratetype == MIGRATE_RESERVE;
+}
 
 #define for_each_migratetype_order(order, type) \
 	for (order = 0; order < MAX_ORDER; order++) \
