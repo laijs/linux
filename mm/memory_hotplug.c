@@ -457,7 +457,7 @@ static int online_pages_range(unsigned long start_pfn, unsigned long nr_pages,
 }
 
 
-int __ref online_pages(unsigned long pfn, unsigned long nr_pages)
+int __ref online_pages(unsigned long pfn, unsigned long nr_pages, int movable)
 {
 	unsigned long onlined_pages = 0;
 	struct zone *zone;
@@ -465,6 +465,12 @@ int __ref online_pages(unsigned long pfn, unsigned long nr_pages)
 	int nid;
 	int ret;
 	struct memory_notify arg;
+
+	/* at least, alignment against pageblock is necessary */
+	if (!IS_ALIGNED(pfn, pageblock_nr_pages))
+		return -EINVAL;
+	if (!IS_ALIGNED(nr_pages, pageblock_nr_pages))
+		return -EINVAL;
 
 	lock_memory_hotplug();
 	arg.start_pfn = pfn;
@@ -496,6 +502,21 @@ int __ref online_pages(unsigned long pfn, unsigned long nr_pages)
 	mutex_lock(&zonelists_mutex);
 	if (!populated_zone(zone))
 		need_zonelists_rebuild = 1;
+
+#ifdef CONFIG_MEMORY_HOTREMOVE
+	if (movable) {
+		unsigned long offset;
+
+		for (offset = 0;
+		     offset < nr_pages;
+		     offset += pageblock_nr_pages) {
+			spin_lock_irq(&zone->lock);
+			set_pageblock_migratetype(pfn_to_page(pfn + offset),
+					MIGRATE_HOTREMOVE);
+			spin_unlock_irq(&zone->lock);
+		}
+	}
+#endif
 
 	ret = walk_system_ram_range(pfn, nr_pages, &onlined_pages,
 		online_pages_range);
@@ -866,13 +887,14 @@ check_pages_isolated(unsigned long start_pfn, unsigned long end_pfn)
 }
 
 static int __ref offline_pages(unsigned long start_pfn,
-		  unsigned long end_pfn, unsigned long timeout)
+		  unsigned long end_pfn, unsigned long timeout, int movable)
 {
 	unsigned long pfn, nr_pages, expire;
 	long offlined_pages;
 	int ret, drain, retry_max, node;
 	struct zone *zone;
 	struct memory_notify arg;
+	int origin_mt = movable ? MIGRATE_HOTREMOVE : MIGRATE_MOVABLE;
 
 	BUG_ON(start_pfn >= end_pfn);
 	/* at least, alignment against pageblock is necessary */
@@ -892,7 +914,7 @@ static int __ref offline_pages(unsigned long start_pfn,
 	nr_pages = end_pfn - start_pfn;
 
 	/* set above range as isolated */
-	ret = start_isolate_page_range(start_pfn, end_pfn, MIGRATE_MOVABLE);
+	ret = start_isolate_page_range(start_pfn, end_pfn, origin_mt);
 	if (ret)
 		goto out;
 
@@ -983,23 +1005,23 @@ failed_removal:
 	       ((unsigned long long) end_pfn << PAGE_SHIFT) - 1);
 	memory_notify(MEM_CANCEL_OFFLINE, &arg);
 	/* pushback to free area */
-	undo_isolate_page_range(start_pfn, end_pfn, MIGRATE_MOVABLE);
+	undo_isolate_page_range(start_pfn, end_pfn, origin_mt);
 
 out:
 	unlock_memory_hotplug();
 	return ret;
 }
 
-int remove_memory(u64 start, u64 size)
+int remove_memory(u64 start, u64 size, int movable)
 {
 	unsigned long start_pfn, end_pfn;
 
 	start_pfn = PFN_DOWN(start);
 	end_pfn = start_pfn + PFN_DOWN(size);
-	return offline_pages(start_pfn, end_pfn, 120 * HZ);
+	return offline_pages(start_pfn, end_pfn, 120 * HZ, movable);
 }
 #else
-int remove_memory(u64 start, u64 size)
+int remove_memory(u64 start, u64 size, int movable)
 {
 	return -EINVAL;
 }

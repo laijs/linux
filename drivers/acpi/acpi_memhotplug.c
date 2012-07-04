@@ -318,7 +318,8 @@ static int acpi_memory_disable_device(struct acpi_memory_device *mem_device)
 	 */
 	list_for_each_entry_safe(info, n, &mem_device->res_list, list) {
 		if (info->enabled) {
-			result = remove_memory(info->start_addr, info->length);
+			result = remove_memory(info->start_addr,
+					info->length, 0);
 			if (result)
 				return result;
 		}

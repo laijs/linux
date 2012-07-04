@@ -246,7 +246,7 @@ static bool pages_correctly_reserved(unsigned long start_pfn,
  * OK to have direct references to sparsemem variables in here.
  */
 static int
-memory_block_action(unsigned long phys_index, unsigned long action)
+memory_block_action(unsigned long phys_index, unsigned long action, int movable)
 {
 	unsigned long start_pfn, start_paddr;
 	unsigned long nr_pages = PAGES_PER_SECTION * sections_per_block;
@@ -262,12 +262,12 @@ memory_block_action(unsigned long phys_index, unsigned long action)
 			if (!pages_correctly_reserved(start_pfn, nr_pages))
 				return -EBUSY;
 
-			ret = online_pages(start_pfn, nr_pages);
+			ret = online_pages(start_pfn, nr_pages, movable);
 			break;
 		case MEM_OFFLINE:
 			start_paddr = page_to_pfn(first_page) << PAGE_SHIFT;
 			ret = remove_memory(start_paddr,
-					    nr_pages << PAGE_SHIFT);
+					    nr_pages << PAGE_SHIFT, movable);
 			break;
 		default:
 			WARN(1, KERN_WARNING "%s(%ld, %ld) unknown action: "
@@ -279,7 +279,8 @@ memory_block_action(unsigned long phys_index, unsigned long action)
 }
 
 static int memory_block_change_state(struct memory_block *mem,
-		unsigned long to_state, unsigned long from_state_req)
+		unsigned long to_state, unsigned long from_state_req,
+		int movable)
 {
 	int ret = 0;
 
@@ -290,16 +291,19 @@ static int memory_block_change_state(struct memory_block *mem,
 		goto out;
 	}
 
-	if (to_state == MEM_OFFLINE)
+	if (to_state == MEM_OFFLINE) {
+		movable = mem->movable;
 		mem->state = MEM_GOING_OFFLINE;
+	}
 
-	ret = memory_block_action(mem->start_section_nr, to_state);
+	ret = memory_block_action(mem->start_section_nr, to_state, movable);
 
 	if (ret) {
 		mem->state = from_state_req;
 		goto out;
 	}
 
+	mem->movable = movable;
 	mem->state = to_state;
 	switch (mem->state) {
 	case MEM_OFFLINE:
@@ -325,10 +329,12 @@ store_mem_state(struct device *dev,
 
 	mem = container_of(dev, struct memory_block, dev);
 
-	if (!strncmp(buf, "online", min((int)count, 6)))
-		ret = memory_block_change_state(mem, MEM_ONLINE, MEM_OFFLINE);
+	if (!strncmp(buf, "online_movable", min((int)count, 14)))
+		ret = memory_block_change_state(mem, MEM_ONLINE, MEM_OFFLINE, 1);
+	else if (!strncmp(buf, "online", min((int)count, 6)))
+		ret = memory_block_change_state(mem, MEM_ONLINE, MEM_OFFLINE, 0);
 	else if(!strncmp(buf, "offline", min((int)count, 7)))
-		ret = memory_block_change_state(mem, MEM_OFFLINE, MEM_ONLINE);
+		ret = memory_block_change_state(mem, MEM_OFFLINE, MEM_ONLINE, 0);
 
 	if (ret)
 		return ret;

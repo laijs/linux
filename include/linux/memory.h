@@ -26,6 +26,7 @@ struct memory_block {
 	unsigned long end_section_nr;
 	unsigned long state;
 	int section_count;
+	int movable;
 
 	/*
 	 * This serializes all state change requests.  It isn't
