@@ -995,6 +995,16 @@ static void cwq_activate_first_delayed(struct cpu_workqueue_struct *cwq)
 	cwq_activate_delayed_work(work);
 }
 
+static void wq_dec_flusher_ref(struct workqueue_struct *wq, int color)
+{
+	/*
+	 * If this was the last reference, wake up the first flusher.
+	 * It will handle the rest.
+	 */
+	if (atomic_dec_and_test(&wq->nr_cwqs_to_flush[color]))
+		complete(&wq->first_flusher->done);
+}
+
 /**
  * cwq_dec_nr_in_flight - decrement cwq's nr_in_flight
  * @cwq: cwq of interest
@@ -1032,12 +1042,7 @@ static void cwq_dec_nr_in_flight(struct cpu_workqueue_struct *cwq, int color)
 	/* this cwq is done, clear flush_color */
 	cwq->flush_color = -1;
 
-	/*
-	 * If this was the last cwq, wake up the first flusher.  It
-	 * will handle the rest.
-	 */
-	if (atomic_dec_and_test(&cwq->wq->nr_cwqs_to_flush[color]))
-		complete(&cwq->wq->first_flusher->done);
+	wq_dec_flusher_ref(cwq->wq, color);
 }
 
 /**
@@ -2594,9 +2599,8 @@ static bool flush_workqueue_prep_cwqs(struct workqueue_struct *wq,
 		spin_unlock_irq(&gcwq->lock);
 	}
 
-	if (flush_color >= 0 &&
-	    atomic_dec_and_test(&wq->nr_cwqs_to_flush[flush_color]))
-		complete(&wq->first_flusher->done);
+	if (flush_color >= 0)
+		wq_dec_flusher_ref(wq, flush_color);
 
 	return wait;
 }
