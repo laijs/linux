@@ -2740,15 +2740,8 @@ void flush_workqueue(struct workqueue_struct *wq)
 
 		list_del_init(&next->list);
 		wq->first_flusher = next;
-
-		if (flush_workqueue_prep_cwqs(wq, wq->flush_color, -1))
-			break;
-
-		/*
-		 * Meh... this color is already done, clear first
-		 * flusher and repeat cascading.
-		 */
-		wq->first_flusher = NULL;
+		flush_workqueue_prep_cwqs(wq, wq->flush_color, -1);
+		break;
 	}
 
 out_unlock:
