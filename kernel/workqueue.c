@@ -252,7 +252,6 @@ struct workqueue_struct {
 	atomic_t		nr_cwqs_to_flush[WORK_NR_COLORS];
 	struct wq_flusher	*first_flusher;	/* F: first flusher */
 	struct list_head	flusher_queue;	/* F: flush waiters */
-	struct list_head	flusher_overflow; /* F: flush overflow list */
 
 	mayday_mask_t		mayday_mask;	/* cpus requesting rescue */
 	struct worker		*rescuer;	/* I: rescue worker */
@@ -2600,7 +2599,7 @@ void flush_workqueue(struct workqueue_struct *wq)
 		.flush_color = -1,
 		.done = COMPLETION_INITIALIZER_ONSTACK(this_flusher.done),
 	};
-	struct wq_flusher *next, *tmp;
+	struct wq_flusher *next, *tmp, *last;
 	int flush_color, next_color;
 
 	lock_map_acquire(&wq->lockdep_map);
@@ -2617,8 +2616,6 @@ void flush_workqueue(struct workqueue_struct *wq)
 
 	if (next_color != wq->flush_color) {
 		/* Color space is not full */
-		BUG_ON(!list_empty(&wq->flusher_overflow));
-
 		if (!wq->first_flusher) {
 			/* no flush in progress, become the first flusher */
 			BUG_ON(wq->flush_color != flush_color);
@@ -2642,11 +2639,11 @@ void flush_workqueue(struct workqueue_struct *wq)
 		}
 	} else {
 		/*
-		 * Oops, color space is full, wait on overflow queue.
+		 * Oops, color space is full, queue it without starting flush.
 		 * The next flush completion will start flush for us
-		 * with freed flush color and transfer us to flusher_queue.
+		 * with freed flush color.
 		 */
-		list_add_tail(&this_flusher.list, &wq->flusher_overflow);
+		list_add_tail(&this_flusher.list, &wq->flusher_queue);
 	}
 
 	mutex_unlock(&wq->flush_mutex);
@@ -2676,26 +2673,8 @@ void flush_workqueue(struct workqueue_struct *wq)
 		complete(&next->done);
 	}
 
-	BUG_ON(!list_empty(&wq->flusher_overflow) &&
-	       wq->flush_color != work_next_color(wq->work_color));
-
 	/* this flush_color is finished, advance by one */
 	wq->flush_color = work_next_color(wq->flush_color);
-
-	/* one color has been freed, handle overflow queue */
-	if (!list_empty(&wq->flusher_overflow)) {
-		BUG_ON(list_first_entry(&wq->flusher_overflow,
-					struct wq_flusher,
-					list)->flush_color
-		       != wq->work_color);
-		/*
-		 * start flush with the freed color and append
-		 * overflowed flushers to the flusher_queue.
-		 */
-		list_splice_tail_init(&wq->flusher_overflow,
-				      &wq->flusher_queue);
-		workqueue_start_flush(wq);
-	}
 
 	if (list_empty(&wq->flusher_queue)) {
 		BUG_ON(wq->flush_color != wq->work_color);
@@ -2710,8 +2689,17 @@ void flush_workqueue(struct workqueue_struct *wq)
 	BUG_ON(wq->flush_color == wq->work_color);
 	BUG_ON(wq->flush_color != next->flush_color);
 
+	last = list_entry(wq->flusher_queue.prev, struct wq_flusher, list);
 	list_del_init(&next->list);
 	wq->first_flusher = next;
+
+	/* if have unstarted flushers appened, start flush for them */
+	if (last->flush_color == wq->work_color)
+		workqueue_start_flush(wq);
+
+	BUG_ON(work_next_color(last->flush_color) != wq->work_color);
+
+	/* arm new first flusher */
 	wq_dec_flusher_ref(wq, wq->flush_color);
 
 out_unlock:
@@ -3221,7 +3209,6 @@ struct workqueue_struct *__alloc_workqueue_key(const char *fmt,
 	for (color = 0; color < WORK_NR_COLORS; color++)
 		atomic_set(&wq->nr_cwqs_to_flush[color], 0);
 	INIT_LIST_HEAD(&wq->flusher_queue);
-	INIT_LIST_HEAD(&wq->flusher_overflow);
 
 	lockdep_init_map(&wq->lockdep_map, lock_name, key, 0);
 	INIT_LIST_HEAD(&wq->list);
