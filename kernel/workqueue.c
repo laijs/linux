@@ -196,7 +196,6 @@ struct cpu_workqueue_struct {
 	struct worker_pool	*pool;		/* I: the associated pool */
 	struct workqueue_struct *wq;		/* I: the owning workqueue */
 	int			work_color;	/* L: current color */
-	int			flush_color;	/* L: flushing color */
 	int			nr_in_flight[WORK_NR_COLORS];
 						/* L: nr of in_flight works */
 	int			nr_active;	/* L: nr of active works */
@@ -1031,17 +1030,15 @@ static void cwq_dec_nr_in_flight(struct cpu_workqueue_struct *cwq, int color)
 			cwq_activate_first_delayed(cwq);
 	}
 
-	/* is flush in progress and are we at the flushing tip? */
-	if (likely(cwq->flush_color != color))
+	/* is flush in progress? */
+	if (likely(cwq->work_color == color))
 		return;
 
 	/* are there still in-flight works? */
 	if (cwq->nr_in_flight[color])
 		return;
 
-	/* this cwq is done, clear flush_color */
-	cwq->flush_color = -1;
-
+	/* this cwq is done, release the flusher ref of the color */
 	wq_dec_flusher_ref(cwq->wq, color);
 }
 
@@ -2541,13 +2538,6 @@ static void insert_wq_barrier(struct cpu_workqueue_struct *cwq,
  *
  * Prepare cwqs for workqueue flushing.
  *
- * If @flush_color is non-negative, flush_color on all cwqs should be
- * -1.  If no cwq has in-flight commands at the specified color, all
- * cwq->flush_color's stay at -1 and %false is returned.  If any cwq
- * has in flight commands, its cwq->flush_color is set to
- * @flush_color, @wq->nr_cwqs_to_flush[flush_color] is updated accordingly,
- * cwq wakeup logic is armed and %true is returned.
- *
  * The caller should have initialized @wq->first_flusher prior to
  * calling this function with non-negative @flush_color.  If
  * @flush_color is negative, no flush color update is done and %false
@@ -2572,6 +2562,7 @@ static bool flush_workqueue_prep_cwqs(struct workqueue_struct *wq,
 
 	if (flush_color >= 0) {
 		BUG_ON(atomic_read(&wq->nr_cwqs_to_flush[flush_color]));
+		/* this ref is held by first flusher */
 		atomic_set(&wq->nr_cwqs_to_flush[flush_color], 1);
 	}
 
@@ -2582,10 +2573,7 @@ static bool flush_workqueue_prep_cwqs(struct workqueue_struct *wq,
 		spin_lock_irq(&gcwq->lock);
 
 		if (flush_color >= 0) {
-			BUG_ON(cwq->flush_color != -1);
-
 			if (cwq->nr_in_flight[flush_color]) {
-				cwq->flush_color = flush_color;
 				atomic_inc(&wq->nr_cwqs_to_flush[flush_color]);
 				wait = true;
 			}
@@ -2598,9 +2586,6 @@ static bool flush_workqueue_prep_cwqs(struct workqueue_struct *wq,
 
 		spin_unlock_irq(&gcwq->lock);
 	}
-
-	if (flush_color >= 0)
-		wq_dec_flusher_ref(wq, flush_color);
 
 	return wait;
 }
@@ -2623,7 +2608,7 @@ void flush_workqueue(struct workqueue_struct *wq)
 		.done = COMPLETION_INITIALIZER_ONSTACK(this_flusher.done),
 	};
 	struct wq_flusher *next, *tmp;
-	int next_color;
+	int flush_color, next_color;
 
 	lock_map_acquire(&wq->lockdep_map);
 	lock_map_release(&wq->lockdep_map);
@@ -2633,6 +2618,7 @@ void flush_workqueue(struct workqueue_struct *wq)
 	/*
 	 * Start-to-wait phase
 	 */
+	flush_color = wq->work_color;
 	next_color = work_next_color(wq->work_color);
 
 	if (next_color != wq->flush_color) {
@@ -2642,27 +2628,31 @@ void flush_workqueue(struct workqueue_struct *wq)
 		 * by one.
 		 */
 		BUG_ON(!list_empty(&wq->flusher_overflow));
-		this_flusher.flush_color = wq->work_color;
+		this_flusher.flush_color = flush_color;
 		wq->work_color = next_color;
 
 		if (!wq->first_flusher) {
 			/* no flush in progress, become the first flusher */
-			BUG_ON(wq->flush_color != this_flusher.flush_color);
+			BUG_ON(wq->flush_color != flush_color);
 
 			wq->first_flusher = &this_flusher;
 
-			if (!flush_workqueue_prep_cwqs(wq, wq->flush_color,
+			if (!flush_workqueue_prep_cwqs(wq, flush_color,
 						       wq->work_color)) {
 				/* nothing to flush, done */
+				wq_dec_flusher_ref(wq, flush_color);
 				wq->flush_color = next_color;
 				wq->first_flusher = NULL;
 				goto out_unlock;
 			}
+
+			wq_dec_flusher_ref(wq, flush_color);
 		} else {
 			/* wait in queue */
 			BUG_ON(wq->flush_color == this_flusher.flush_color);
 			list_add_tail(&this_flusher.list, &wq->flusher_queue);
-			flush_workqueue_prep_cwqs(wq, -1, wq->work_color);
+			flush_workqueue_prep_cwqs(wq, flush_color,
+						  wq->work_color);
 		}
 	} else {
 		/*
@@ -2717,11 +2707,12 @@ void flush_workqueue(struct workqueue_struct *wq)
 		list_for_each_entry(tmp, &wq->flusher_overflow, list)
 			tmp->flush_color = wq->work_color;
 
+		flush_color = wq->work_color;
 		wq->work_color = work_next_color(wq->work_color);
 
 		list_splice_tail_init(&wq->flusher_overflow,
 				      &wq->flusher_queue);
-		flush_workqueue_prep_cwqs(wq, -1, wq->work_color);
+		flush_workqueue_prep_cwqs(wq, flush_color, wq->work_color);
 	}
 
 	if (list_empty(&wq->flusher_queue)) {
@@ -2732,14 +2723,14 @@ void flush_workqueue(struct workqueue_struct *wq)
 
 	/*
 	 * Need to flush more colors.  Make the next flusher
-	 * the new first flusher and arm cwqs.
+	 * the new first flusher and arm it.
 	 */
 	BUG_ON(wq->flush_color == wq->work_color);
 	BUG_ON(wq->flush_color != next->flush_color);
 
 	list_del_init(&next->list);
 	wq->first_flusher = next;
-	flush_workqueue_prep_cwqs(wq, wq->flush_color, -1);
+	wq_dec_flusher_ref(wq, wq->flush_color);
 
 out_unlock:
 	mutex_unlock(&wq->flush_mutex);
@@ -3264,7 +3255,6 @@ struct workqueue_struct *__alloc_workqueue_key(const char *fmt,
 		BUG_ON((unsigned long)cwq & WORK_STRUCT_FLAG_MASK);
 		cwq->pool = &gcwq->pools[pool_idx];
 		cwq->wq = wq;
-		cwq->flush_color = -1;
 		cwq->max_active = max_active;
 		INIT_LIST_HEAD(&cwq->delayed_works);
 	}
