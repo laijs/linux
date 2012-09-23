@@ -2613,11 +2613,11 @@ void flush_workqueue(struct workqueue_struct *wq)
 	 */
 	flush_color = wq->work_color;
 	next_color = work_next_color(wq->work_color);
+	this_flusher.flush_color = flush_color;
 
 	if (next_color != wq->flush_color) {
 		/* Color space is not full */
 		BUG_ON(!list_empty(&wq->flusher_overflow));
-		this_flusher.flush_color = flush_color;
 
 		if (!wq->first_flusher) {
 			/* no flush in progress, become the first flusher */
@@ -2643,8 +2643,8 @@ void flush_workqueue(struct workqueue_struct *wq)
 	} else {
 		/*
 		 * Oops, color space is full, wait on overflow queue.
-		 * The next flush completion will assign us
-		 * flush_color and transfer to flusher_queue.
+		 * The next flush completion will start flush for us
+		 * with freed flush color and transfer us to flusher_queue.
 		 */
 		list_add_tail(&this_flusher.list, &wq->flusher_overflow);
 	}
@@ -2684,15 +2684,14 @@ void flush_workqueue(struct workqueue_struct *wq)
 
 	/* one color has been freed, handle overflow queue */
 	if (!list_empty(&wq->flusher_overflow)) {
+		BUG_ON(list_first_entry(&wq->flusher_overflow,
+					struct wq_flusher,
+					list)->flush_color
+		       != wq->work_color);
 		/*
-		 * Assign the same color to all overflowed
-		 * flushers, advance work_color and append to
-		 * flusher_queue.  This is the start-to-wait
-		 * phase for these overflowed flushers.
+		 * start flush with the freed color and append
+		 * overflowed flushers to the flusher_queue.
 		 */
-		list_for_each_entry(tmp, &wq->flusher_overflow, list)
-			tmp->flush_color = wq->work_color;
-
 		list_splice_tail_init(&wq->flusher_overflow,
 				      &wq->flusher_queue);
 		workqueue_start_flush(wq);
