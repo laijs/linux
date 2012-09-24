@@ -248,7 +248,6 @@ struct workqueue_struct {
 
 	struct mutex		flush_mutex;	/* protects wq flushing */
 	int			work_color;	/* F: current work color */
-	int			flush_color;	/* F: current flush color */
 	atomic_t		nr_cwqs_to_flush[WORK_NR_COLORS];
 	struct wq_flusher	*first_flusher;	/* F: first flusher */
 	struct list_head	flusher_queue;	/* F: flush waiters */
@@ -2555,7 +2554,7 @@ static bool workqueue_start_flush(struct workqueue_struct *wq)
 	bool wait = false;
 	unsigned int cpu;
 
-	BUG_ON(next_color == wq->flush_color);
+	BUG_ON(next_color == wq->first_flusher->flush_color);
 	wq->work_color = next_color;
 
 	BUG_ON(atomic_read(&wq->nr_cwqs_to_flush[flush_color]));
@@ -2614,29 +2613,23 @@ void flush_workqueue(struct workqueue_struct *wq)
 	next_color = work_next_color(wq->work_color);
 	this_flusher.flush_color = flush_color;
 
-	if (next_color != wq->flush_color) {
-		/* Color space is not full */
-		if (!wq->first_flusher) {
-			/* no flush in progress, become the first flusher */
-			BUG_ON(wq->flush_color != flush_color);
+	if (!wq->first_flusher) {
+		/* no flush in progress, become the first flusher */
+		wq->first_flusher = &this_flusher;
 
-			wq->first_flusher = &this_flusher;
-
-			if (!workqueue_start_flush(wq)) {
-				/* nothing to flush, done */
-				wq_dec_flusher_ref(wq, flush_color);
-				wq->flush_color = next_color;
-				wq->first_flusher = NULL;
-				goto out_unlock;
-			}
-
+		if (!workqueue_start_flush(wq)) {
+			/* nothing to flush, done */
 			wq_dec_flusher_ref(wq, flush_color);
-		} else {
-			/* wait in queue */
-			BUG_ON(wq->flush_color == this_flusher.flush_color);
-			list_add_tail(&this_flusher.list, &wq->flusher_queue);
-			workqueue_start_flush(wq);
+			wq->first_flusher = NULL;
+			goto out_unlock;
 		}
+
+		wq_dec_flusher_ref(wq, flush_color);
+	} else if (next_color != wq->first_flusher->flush_color) {
+		/* Color space is not full, wait in queue */
+		BUG_ON(wq->first_flusher->flush_color == flush_color);
+		list_add_tail(&this_flusher.list, &wq->flusher_queue);
+		workqueue_start_flush(wq);
 	} else {
 		/*
 		 * Oops, color space is full, queue it without starting flush.
@@ -2663,21 +2656,17 @@ void flush_workqueue(struct workqueue_struct *wq)
 
 	BUG_ON(wq->first_flusher != &this_flusher);
 	BUG_ON(!list_empty(&this_flusher.list));
-	BUG_ON(wq->flush_color != this_flusher.flush_color);
 
 	/* complete all the flushers sharing the current flush color */
 	list_for_each_entry_safe(next, tmp, &wq->flusher_queue, list) {
-		if (next->flush_color != wq->flush_color)
+		if (next->flush_color != flush_color)
 			break;
 		list_del_init(&next->list);
 		complete(&next->done);
 	}
 
-	/* this flush_color is finished, advance by one */
-	wq->flush_color = work_next_color(wq->flush_color);
-
 	if (list_empty(&wq->flusher_queue)) {
-		BUG_ON(wq->flush_color != wq->work_color);
+		BUG_ON(work_next_color(flush_color) != wq->work_color);
 		wq->first_flusher = NULL;
 		goto out_unlock;
 	}
@@ -2686,9 +2675,6 @@ void flush_workqueue(struct workqueue_struct *wq)
 	 * Need to flush more colors.  Make the next flusher
 	 * the new first flusher and arm it.
 	 */
-	BUG_ON(wq->flush_color == wq->work_color);
-	BUG_ON(wq->flush_color != next->flush_color);
-
 	last = list_entry(wq->flusher_queue.prev, struct wq_flusher, list);
 	list_del_init(&next->list);
 	wq->first_flusher = next;
@@ -2698,9 +2684,11 @@ void flush_workqueue(struct workqueue_struct *wq)
 		workqueue_start_flush(wq);
 
 	BUG_ON(work_next_color(last->flush_color) != wq->work_color);
+	BUG_ON(work_next_color(flush_color) != next->flush_color);
+	BUG_ON(next->flush_color == wq->work_color);
 
 	/* arm new first flusher */
-	wq_dec_flusher_ref(wq, wq->flush_color);
+	wq_dec_flusher_ref(wq, next->flush_color);
 
 out_unlock:
 	mutex_unlock(&wq->flush_mutex);
