@@ -439,6 +439,10 @@ static atomic_t unbound_std_pool_nr_running[NR_STD_WORKER_POOLS] = {
 static DEFINE_MUTEX(worker_pool_idr_mutex);
 static DEFINE_IDR(worker_pool_idr);
 
+/* idr of all workers */
+static DEFINE_MUTEX(worker_idr_mutex);
+static DEFINE_IDR(worker_idr);
+
 static int worker_thread(void *__worker);
 
 static struct worker_pool *std_worker_pools(int cpu)
@@ -452,6 +456,26 @@ static struct worker_pool *std_worker_pools(int cpu)
 static int std_worker_pool_pri(struct worker_pool *pool)
 {
 	return pool - std_worker_pools(pool->cpu);
+}
+
+/* allocate ID and assign it to @worker */
+static int worker_assign_gwid(struct worker *worker)
+{
+	int ret;
+
+	mutex_lock(&worker_idr_mutex);
+	idr_pre_get(&worker_idr, GFP_KERNEL);
+	ret = idr_get_new(&worker_idr, worker, &worker->gwid);
+	mutex_unlock(&worker_idr_mutex);
+
+	return ret;
+}
+
+static void free_worker_gwid(struct worker *worker)
+{
+	mutex_lock(&worker_idr_mutex);
+	idr_remove(&worker_idr, worker->gwid);
+	mutex_unlock(&worker_idr_mutex);
 }
 
 /* allocate ID and assign it to @pool */
@@ -1775,6 +1799,9 @@ static struct worker *create_worker(struct worker_pool *pool)
 	}
 	spin_unlock_irq(&pool->lock);
 
+	if (worker_assign_gwid(worker))
+		goto fail;
+
 	worker = alloc_worker();
 	if (!worker)
 		goto fail;
@@ -1868,6 +1895,7 @@ static void destroy_worker(struct worker *worker)
 	spin_unlock_irq(&pool->lock);
 
 	kthread_stop(worker->task);
+	free_worker_gwid(worker);
 	kfree(worker);
 
 	spin_lock_irq(&pool->lock);
