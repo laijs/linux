@@ -1067,6 +1067,7 @@ static int try_to_grab_pending(struct work_struct *work, bool is_dwork,
 			       unsigned long *flags)
 {
 	struct worker_pool *pool;
+	struct cpu_workqueue_struct *cwq;
 
 	local_irq_save(*flags);
 
@@ -1096,14 +1097,20 @@ static int try_to_grab_pending(struct work_struct *work, bool is_dwork,
 		goto fail;
 
 	spin_lock(&pool->lock);
-	if (!list_empty(&work->entry)) {
-		/*
-		 * This work is queued, but perhaps we locked the wrong
-		 * pool.  In that case we must see the new value after
-		 * rmb(), see insert_work()->wmb().
-		 */
-		smp_rmb();
-		if (pool == get_work_pool(work)) {
+	/*
+	 * The CWQ bit is set/cleared only when we do enqueue/dequeue the work
+	 * When a work is enqueued(insert_work()) to a pool:
+	 *	we set cwq(CWQ bit) with pool->lock held
+	 * when a work is dequeued(process_one_work(),try_to_grab_pending()):
+	 *	we clear cwq(CWQ bit) with pool->lock held
+	 *
+	 * So when if the pool->lock is held, we can determin:
+	 * 	CWQ bit is set and the cwq->pool == pool
+	 * 	<==> the work is queued on the pool
+	 */
+	cwq = get_work_cwq(work);
+	if (cwq) {
+		if (pool == cwq->pool) {
 			debug_work_deactivate(work);
 
 			/*
@@ -1156,13 +1163,6 @@ static void insert_work(struct cpu_workqueue_struct *cwq,
 
 	/* we own @work, set data and link */
 	set_work_cwq(work, cwq, extra_flags);
-
-	/*
-	 * Ensure that we get the right work->data if we see the
-	 * result of list_add() below, see try_to_grab_pending().
-	 */
-	smp_wmb();
-
 	list_add_tail(&work->entry, head);
 
 	/*
@@ -2796,15 +2796,10 @@ static bool start_flush_work(struct work_struct *work, struct wq_barrier *barr)
 		return false;
 
 	spin_lock_irq(&pool->lock);
-	if (!list_empty(&work->entry)) {
-		/*
-		 * See the comment near try_to_grab_pending()->smp_rmb().
-		 * If it was re-queued to a different pool under us, we
-		 * are not going to wait.
-		 */
-		smp_rmb();
-		cwq = get_work_cwq(work);
-		if (unlikely(!cwq || pool != cwq->pool))
+	/* See the comment near try_to_grab_pending() with the same code */
+	cwq = get_work_cwq(work);
+	if (cwq) {
+		if (unlikely(pool != cwq->pool))
 			goto already_gone;
 	} else {
 		worker = find_worker_executing_work(pool, work);
