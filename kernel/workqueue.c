@@ -1212,7 +1212,6 @@ static bool is_chained_work(struct workqueue_struct *wq)
 static void __queue_work(unsigned int cpu, struct workqueue_struct *wq,
 			 struct work_struct *work)
 {
-	bool highpri = wq->flags & WQ_HIGHPRI;
 	struct worker_pool *pool;
 	struct cpu_workqueue_struct *cwq;
 	struct list_head *worklist;
@@ -1247,7 +1246,7 @@ static void __queue_work(unsigned int cpu, struct workqueue_struct *wq,
 		 * work needs to be queued on that cpu to guarantee
 		 * non-reentrancy.
 		 */
-		pool = get_std_worker_pool(cpu, highpri);
+		pool = get_cwq(cpu, wq)->pool;
 		last_pool = get_work_pool(work);
 
 		if (last_pool && last_pool != pool) {
@@ -1268,7 +1267,7 @@ static void __queue_work(unsigned int cpu, struct workqueue_struct *wq,
 			spin_lock(&pool->lock);
 		}
 	} else {
-		pool = get_std_worker_pool(WORK_CPU_UNBOUND, highpri);
+		pool = get_cwq(WORK_CPU_UNBOUND, wq)->pool;
 		spin_lock(&pool->lock);
 	}
 
