@@ -641,22 +641,22 @@ static struct worker_pool *get_work_pool(struct work_struct *work)
 }
 
 /**
- * get_work_pool_id - return the worker pool ID a given work is associated with
- * @work: the work item of interest
+ * offq_work_pool_id - return the worker pool ID a given work is associated with
+ * @work: the off-queued work item of interest
  *
  * Return the worker_pool ID @work was last associated with.
- * %WORK_OFFQ_POOL_NONE if none.
  */
-static int get_work_pool_id(struct work_struct *work)
+static int offq_work_pool_id(struct work_struct *work)
 {
-	struct worker_pool *pool = get_work_pool(work);
+	unsigned long data = atomic_long_read(&work->data);
 
-	return pool ? pool->id : WORK_OFFQ_POOL_NONE;
+	BUG_ON(data & WORK_STRUCT_CWQ);
+	return data >> WORK_OFFQ_POOL_SHIFT;
 }
 
 static void mark_work_canceling(struct work_struct *work)
 {
-	unsigned long pool_id = get_work_pool_id(work);
+	unsigned long pool_id = offq_work_pool_id(work);
 
 	pool_id <<= WORK_OFFQ_POOL_SHIFT;
 	set_work_data(work, pool_id | WORK_OFFQ_CANCELING, WORK_STRUCT_PENDING);
@@ -2980,7 +2980,7 @@ bool cancel_delayed_work(struct delayed_work *dwork)
 		return false;
 
 	set_work_pool_and_clear_pending(&dwork->work,
-					get_work_pool_id(&dwork->work));
+					offq_work_pool_id(&dwork->work));
 	local_irq_restore(flags);
 	return ret;
 }
