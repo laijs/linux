@@ -1280,9 +1280,10 @@ static void __queue_work(unsigned int cpu, struct workqueue_struct *wq,
 
 			worker = find_worker_executing_work(last_pool, work);
 
-			if (worker && worker->current_cwq->wq == wq)
+			if (worker) {
+				WARN_ON_ONCE(worker->current_cwq->wq != wq);
 				pool = last_pool;
-			else {
+			} else {
 				/* meh... not running there, queue here */
 				spin_unlock(&last_pool->lock);
 				spin_lock(&pool->lock);
