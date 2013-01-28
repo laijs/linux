@@ -531,10 +531,8 @@ static int work_next_color(int color)
  * work->data.  These functions should only be called while the work is
  * owned - ie. while the PENDING bit is set.
  *
- * get_work_pool() and get_work_cwq() can be used to obtain the pool or cwq
- * corresponding to a work.  Pool is available once the work has been
- * queued anywhere after initialization until it is sync canceled.  cwq is
- * available only while the work item is queued.
+ * get_work_cwq() can be used to obtain the cwq, it is available only
+ * while the work item is queued.
  *
  * %WORK_OFFQ_CANCELING is used to mark a work item which is being
  * canceled.  While being canceled, a work item may have its PENDING set
@@ -589,31 +587,6 @@ static struct cpu_workqueue_struct *get_work_cwq(struct work_struct *work)
 		return (void *)(data & WORK_STRUCT_WQ_DATA_MASK);
 	else
 		return NULL;
-}
-
-/**
- * get_work_pool - return the worker_pool a given work was associated with
- * @work: the work item of interest
- *
- * Return the worker_pool @work was last associated with.  %NULL if none.
- */
-static struct worker_pool *get_work_pool(struct work_struct *work)
-{
-	unsigned long data = atomic_long_read(&work->data);
-	struct worker_pool *pool;
-	int pool_id;
-
-	if (data & WORK_STRUCT_CWQ)
-		return ((struct cpu_workqueue_struct *)
-			(data & WORK_STRUCT_WQ_DATA_MASK))->pool;
-
-	pool_id = data >> WORK_OFFQ_POOL_SHIFT;
-	if (pool_id == WORK_OFFQ_POOL_NONE)
-		return NULL;
-
-	pool = worker_pool_by_id(pool_id);
-	WARN_ON_ONCE(!pool);
-	return pool;
 }
 
 /**
@@ -936,6 +909,7 @@ static struct worker *find_worker_executing_work(struct worker_pool *pool,
 
 /** lock_pool_executing_work - lock the pool a given work is running on
  * @work: work of interest
+ * @pool_id: pool_id obtained from @work data
  * @worker: return the worker which is executing @work if found
  *
  * CONTEXT:
@@ -946,9 +920,9 @@ static struct worker *find_worker_executing_work(struct worker_pool *pool,
  * NULL otherwise.
  */
 static struct worker_pool *lock_pool_executing_work(struct work_struct *work,
+						    unsigned long pool_id,
 						    struct worker **worker)
 {
-	unsigned long pool_id = offq_work_pool_id(work);
 	struct worker_pool *pool;
 	struct worker *exec;
 
@@ -973,6 +947,7 @@ static struct worker_pool *lock_pool_executing_work(struct work_struct *work,
 
 /** lock_pool_queued_work - lock the pool a given work is queued on
  * @work: work of interest
+ * @cwq: cwq obtained from @work data
  *
  * CONTEXT:
  * local_irq_disable()
@@ -981,13 +956,11 @@ static struct worker_pool *lock_pool_executing_work(struct work_struct *work,
  * Ponter to work pool(and locked) on which @work is queued if found,
  * NULL otherwise.
  */
-static struct worker_pool *lock_pool_queued_work(struct work_struct *work)
+static
+struct worker_pool *lock_pool_queued_work(struct work_struct *work,
+					  struct cpu_workqueue_struct *cwq)
 {
-	struct cpu_workqueue_struct *cwq = get_work_cwq(work);
 	struct worker_pool *pool;
-
-	if (!cwq)
-		return NULL;
 
 	pool = cwq->pool;
 	spin_lock(&pool->lock);
@@ -1006,6 +979,40 @@ static struct worker_pool *lock_pool_queued_work(struct work_struct *work)
 	if (cwq && cwq->pool == pool)
 		return pool;
 	spin_unlock(&pool->lock);
+
+	return NULL;
+}
+
+/** lock_pool_own_work - lock the pool a given work is queued/running on
+ * @work: work of interest
+ * @worker: return the worker which is executing off-queued @work if found
+ *
+ * CONTEXT:
+ * local_irq_disable()
+ *
+ * RETURNS:
+ * Ponter to work pool(and locked) on which @work is queued/running if found,
+ * 	- If the work is queued on the pool, lock and return the pool, with
+ * 	  @worker untouched. The work may or may not be running on the pool.
+ * 	- If the work is not queued on the pool, but it is running on the pool,
+ * 	  lock and return the pool with @worker set to the executing worker
+ * 	  (This step will be skept if @worker is NULL)
+ * NULL otherwise with @worker untouched
+ */
+static struct worker_pool *lock_pool_own_work(struct work_struct *work,
+					      struct worker **worker)
+{
+	unsigned long data = atomic_long_read(&work->data);
+	struct cpu_workqueue_struct *cwq;
+	unsigned long pool_id;
+
+	if (data & WORK_STRUCT_CWQ) {
+		cwq = (void *)(data & WORK_STRUCT_WQ_DATA_MASK);
+		return lock_pool_queued_work(work, cwq);
+	} else if (worker) {
+		pool_id = data >> WORK_OFFQ_POOL_SHIFT;
+		return lock_pool_executing_work(work, pool_id, worker);
+	}
 
 	return NULL;
 }
@@ -1167,7 +1174,7 @@ static int try_to_grab_pending(struct work_struct *work, bool is_dwork,
 	 * The queueing is in progress, or it is already queued. Try to
 	 * steal it from ->worklist without clearing WORK_STRUCT_PENDING.
 	 */
-	pool = lock_pool_queued_work(work);
+	pool = lock_pool_own_work(work, NULL);
 	if (pool) {
 		debug_work_deactivate(work);
 
@@ -1301,7 +1308,7 @@ static void __queue_work(unsigned int cpu, struct workqueue_struct *wq,
 		 * to guarantee non-reentrancy.
 		 */
 		BUG_ON(get_work_cwq(work));
-		pool = lock_pool_executing_work(work, &worker);
+		pool = lock_pool_own_work(work, &worker);
 		if (!pool) {
 			pool = get_cwq(cpu, wq)->pool;
 			spin_lock(&pool->lock);
@@ -2833,22 +2840,14 @@ static bool start_flush_work(struct work_struct *work, struct wq_barrier *barr)
 	struct cpu_workqueue_struct *cwq;
 
 	might_sleep();
-	pool = get_work_pool(work);
+	pool = lock_pool_own_work(work, &worker);
 	if (!pool)
 		return false;
 
-	spin_lock_irq(&pool->lock);
-	/* See the comment near lock_pool_queued_work() with the same code */
-	cwq = get_work_cwq(work);
-	if (cwq) {
-		if (unlikely(pool != cwq->pool))
-			goto already_gone;
-	} else {
-		worker = find_worker_executing_work(pool, work);
-		if (!worker)
-			goto already_gone;
+	if (!worker)
+		cwq = get_work_cwq(work);
+	else
 		cwq = worker->current_cwq;
-	}
 
 	insert_wq_barrier(cwq, barr, work, worker);
 	spin_unlock_irq(&pool->lock);
@@ -2866,9 +2865,6 @@ static bool start_flush_work(struct work_struct *work, struct wq_barrier *barr)
 	lock_map_release(&cwq->wq->lockdep_map);
 
 	return true;
-already_gone:
-	spin_unlock_irq(&pool->lock);
-	return false;
 }
 
 /**
@@ -3467,19 +3463,21 @@ EXPORT_SYMBOL_GPL(workqueue_congested);
  */
 unsigned int work_busy(struct work_struct *work)
 {
-	struct worker_pool *pool = get_work_pool(work);
 	unsigned long flags;
+	struct worker_pool *pool;
+	struct worker *worker = NULL;
 	unsigned int ret = work_pending(work) ? WORK_BUSY_PENDING : 0;
 
-	if (!pool)
-		return ret;
+	local_irq_save(flags);
 
-	spin_lock_irqsave(&pool->lock, flags);
+	pool = lock_pool_own_work(work, &worker);
+	if (pool) {
+		if (worker || find_worker_executing_work(pool, work))
+			ret |= WORK_BUSY_RUNNING;
+		spin_unlock(&pool->lock);
+	}
 
-	if (find_worker_executing_work(pool, work))
-		ret |= WORK_BUSY_RUNNING;
-
-	spin_unlock_irqrestore(&pool->lock, flags);
+	local_irq_restore(flags);
 
 	return ret;
 }
