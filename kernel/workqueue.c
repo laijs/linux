@@ -995,6 +995,45 @@ static struct worker_pool *lock_pool_executing_work(struct work_struct *work,
 	return NULL;
 }
 
+/** lock_pool_queued_work - lock the pool a given work is queued on
+ * @work: work of interest
+ *
+ * CONTEXT:
+ * local_irq_disable()
+ *
+ * RETURNS:
+ * Ponter to work pool(and locked) on which @work is queued if found,
+ * NULL otherwise.
+ */
+static struct worker_pool *lock_pool_queued_work(struct work_struct *work)
+{
+	struct cpu_workqueue_struct *cwq = get_work_cwq(work);
+	struct worker_pool *pool;
+
+	if (!cwq)
+		return NULL;
+
+	pool = cwq->pool;
+	spin_lock(&pool->lock);
+	/*
+	 * The CWQ bit is set/cleared only when we do enqueue/dequeue the work
+	 * When a work is enqueued(insert_work()) to a pool:
+	 *	we set cwq(CWQ bit) with pool->lock held
+	 * when a work is dequeued(process_one_work(),try_to_grab_pending()):
+	 *	we clear cwq(CWQ bit) with pool->lock held
+	 *
+	 * So when if the (orignal cwq)->pool->lock is held, we can determin:
+	 * 	CWQ bit is set and the cwq->pool == pool
+	 * 	<==> the work is queued on the pool
+	 */
+	cwq = get_work_cwq(work);
+	if (cwq && cwq->pool == pool)
+		return pool;
+	spin_unlock(&pool->lock);
+
+	return NULL;
+}
+
 /**
  * move_linked_works - move linked works to a list
  * @work: start of series of works to be scheduled
@@ -1128,7 +1167,6 @@ static int try_to_grab_pending(struct work_struct *work, bool is_dwork,
 			       unsigned long *flags)
 {
 	struct worker_pool *pool;
-	struct cpu_workqueue_struct *cwq;
 
 	local_irq_save(*flags);
 
@@ -1153,49 +1191,29 @@ static int try_to_grab_pending(struct work_struct *work, bool is_dwork,
 	 * The queueing is in progress, or it is already queued. Try to
 	 * steal it from ->worklist without clearing WORK_STRUCT_PENDING.
 	 */
-	pool = get_work_pool(work);
-	if (!pool)
-		goto fail;
+	pool = lock_pool_queued_work(work);
+	if (pool) {
+		debug_work_deactivate(work);
 
-	spin_lock(&pool->lock);
-	/*
-	 * The CWQ bit is set/cleared only when we do enqueue/dequeue the work
-	 * When a work is enqueued(insert_work()) to a pool:
-	 *	we set cwq(CWQ bit) with pool->lock held
-	 * when a work is dequeued(process_one_work(),try_to_grab_pending()):
-	 *	we clear cwq(CWQ bit) with pool->lock held
-	 *
-	 * So when if the pool->lock is held, we can determin:
-	 * 	CWQ bit is set and the cwq->pool == pool
-	 * 	<==> the work is queued on the pool
-	 */
-	cwq = get_work_cwq(work);
-	if (cwq) {
-		if (pool == cwq->pool) {
-			debug_work_deactivate(work);
+		/*
+		 * A delayed work item cannot be grabbed directly
+		 * because it might have linked NO_COLOR work items
+		 * which, if left on the delayed_list, will confuse
+		 * cwq->nr_active management later on and cause
+		 * stall.  Make sure the work item is activated
+		 * before grabbing.
+		 */
+		if (*work_data_bits(work) & WORK_STRUCT_DELAYED)
+			cwq_activate_delayed_work(work);
 
-			/*
-			 * A delayed work item cannot be grabbed directly
-			 * because it might have linked NO_COLOR work items
-			 * which, if left on the delayed_list, will confuse
-			 * cwq->nr_active management later on and cause
-			 * stall.  Make sure the work item is activated
-			 * before grabbing.
-			 */
-			if (*work_data_bits(work) & WORK_STRUCT_DELAYED)
-				cwq_activate_delayed_work(work);
+		list_del_init(&work->entry);
+		cwq_dec_nr_in_flight(get_work_cwq(work), get_work_color(work));
 
-			list_del_init(&work->entry);
-			cwq_dec_nr_in_flight(get_work_cwq(work),
-				get_work_color(work));
-
-			clear_work_cwq(work, pool->id);
-			spin_unlock(&pool->lock);
-			return 1;
-		}
+		clear_work_cwq(work, pool->id);
+		spin_unlock(&pool->lock);
+		return 1;
 	}
-	spin_unlock(&pool->lock);
-fail:
+
 	local_irq_restore(*flags);
 	if (work_is_canceling(work))
 		return -ENOENT;
@@ -2848,7 +2866,7 @@ static bool start_flush_work(struct work_struct *work, struct wq_barrier *barr)
 		return false;
 
 	spin_lock_irq(&pool->lock);
-	/* See the comment near try_to_grab_pending() with the same code */
+	/* See the comment near lock_pool_queued_work() with the same code */
 	cwq = get_work_cwq(work);
 	if (cwq) {
 		if (unlikely(pool != cwq->pool))
