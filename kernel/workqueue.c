@@ -958,6 +958,43 @@ static struct worker *find_worker_executing_work(struct worker_pool *pool,
 	return NULL;
 }
 
+/** lock_pool_executing_work - lock the pool a given work is running on
+ * @work: work of interest
+ * @worker: return the worker which is executing @work if found
+ *
+ * CONTEXT:
+ * local_irq_disable()
+ *
+ * RETURNS:
+ * Ponter to work pool(and locked) on which @work is running if found,
+ * NULL otherwise.
+ */
+static struct worker_pool *lock_pool_executing_work(struct work_struct *work,
+						    struct worker **worker)
+{
+	unsigned long pool_id = offq_work_pool_id(work);
+	struct worker_pool *pool;
+	struct worker *exec;
+
+	if (pool_id == WORK_OFFQ_POOL_NONE)
+		return NULL;
+
+	pool = worker_pool_by_id(pool_id);
+	if (!pool)
+		return NULL;
+
+	spin_lock(&pool->lock);
+	exec = find_worker_executing_work(pool, work);
+	if (exec) {
+		BUG_ON(pool != exec->pool);
+		*worker = exec;
+		return pool;
+	}
+	spin_unlock(&pool->lock);
+
+	return NULL;
+}
+
 /**
  * move_linked_works - move linked works to a list
  * @work: start of series of works to be scheduled
@@ -1259,37 +1296,24 @@ static void __queue_work(unsigned int cpu, struct workqueue_struct *wq,
 
 	/* determine pool to use */
 	if (!(wq->flags & WQ_UNBOUND)) {
-		struct worker_pool *last_pool;
+		struct worker *worker;
 
 		if (cpu == WORK_CPU_UNBOUND)
 			cpu = raw_smp_processor_id();
 
 		/*
-		 * It's multi cpu.  If @work was previously on a different
-		 * cpu, it might still be running there, in which case the
-		 * work needs to be queued on that cpu to guarantee
-		 * non-reentrancy.
+		 * It's multi cpu and pool. If @work is still running on a pool,
+		 * in which case the work needs to be queued on that pool
+		 * to guarantee non-reentrancy.
 		 */
-		pool = get_cwq(cpu, wq)->pool;
-		last_pool = get_work_pool(work);
-
-		if (last_pool && last_pool != pool) {
-			struct worker *worker;
-
-			spin_lock(&last_pool->lock);
-
-			worker = find_worker_executing_work(last_pool, work);
-
-			if (worker) {
-				WARN_ON_ONCE(worker->current_cwq->wq != wq);
-				pool = last_pool;
-			} else {
-				/* meh... not running there, queue here */
-				spin_unlock(&last_pool->lock);
-				spin_lock(&pool->lock);
-			}
-		} else {
+		BUG_ON(get_work_cwq(work));
+		pool = lock_pool_executing_work(work, &worker);
+		if (!pool) {
+			pool = get_cwq(cpu, wq)->pool;
 			spin_lock(&pool->lock);
+		} else {
+			BUG_ON(!worker);
+			WARN_ON_ONCE(worker->current_cwq->wq != wq);
 		}
 	} else {
 		pool = get_cwq(WORK_CPU_UNBOUND, wq)->pool;
