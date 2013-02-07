@@ -556,6 +556,12 @@ static void set_work_cwq(struct work_struct *work,
 		      WORK_STRUCT_PENDING | WORK_STRUCT_CWQ | extra_flags);
 }
 
+static void clear_work_cwq(struct work_struct *work, int pool_id)
+{
+	set_work_data(work, pool_id << WORK_OFFQ_POOL_SHIFT,
+		      WORK_STRUCT_PENDING);
+}
+
 static void set_work_pool_and_clear_pending(struct work_struct *work,
 					    int pool_id)
 {
@@ -1115,6 +1121,7 @@ static int try_to_grab_pending(struct work_struct *work, bool is_dwork,
 			cwq_dec_nr_in_flight(get_work_cwq(work),
 				get_work_color(work));
 
+			clear_work_cwq(work, pool->id);
 			spin_unlock(&pool->lock);
 			return 1;
 		}
