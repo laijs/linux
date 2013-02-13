@@ -1012,10 +1012,9 @@ static void move_linked_works(struct work_struct *work, struct list_head *head,
 		*nextp = n;
 }
 
-static void cwq_activate_delayed_work(struct work_struct *work)
+static void cwq_activate_delayed_work(struct work_struct *work,
+				      struct cpu_workqueue_struct *cwq)
 {
-	struct cpu_workqueue_struct *cwq = get_work_cwq(work);
-
 	trace_workqueue_activate_work(work);
 	move_linked_works(work, &cwq->pool->worklist, NULL);
 	__clear_bit(WORK_STRUCT_DELAYED_BIT, work_data_bits(work));
@@ -1027,7 +1026,7 @@ static void cwq_activate_first_delayed(struct cpu_workqueue_struct *cwq)
 	struct work_struct *work = list_first_entry(&cwq->delayed_works,
 						    struct work_struct, entry);
 
-	cwq_activate_delayed_work(work);
+	cwq_activate_delayed_work(work, cwq);
 }
 
 /**
@@ -1147,10 +1146,10 @@ static int try_to_grab_pending(struct work_struct *work, bool is_dwork,
 		 * item is activated before grabbing.
 		 */
 		if (*work_data_bits(work) & WORK_STRUCT_DELAYED)
-			cwq_activate_delayed_work(work);
+			cwq_activate_delayed_work(work, cwq);
 
 		list_del_init(&work->entry);
-		cwq_dec_nr_in_flight(get_work_cwq(work), get_work_color(work));
+		cwq_dec_nr_in_flight(cwq, get_work_color(work));
 
 		/* work is dequeued, work->data points to pool iff running */
 		if (worker)
