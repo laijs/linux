@@ -36,6 +36,7 @@ struct worker {
 	unsigned long		last_active;	/* L: last active timestamp */
 	unsigned int		flags;		/* X: flags */
 	int			id_in_pool;	/* I: worker id in the pool */
+	int			id;		/* I: worker id (global) */
 
 	/* for rebinding worker to CPU */
 	struct work_struct	rebind_work;	/* L: for busy worker */
