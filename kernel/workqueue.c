@@ -1722,10 +1722,10 @@ static struct worker *create_worker(struct worker_pool *pool)
 {
 	const char *pri = std_worker_pool_pri(pool) ? "H" : "";
 	struct worker *worker = NULL;
-	int id = -1;
+	int id_in_pool = -1;
 
 	spin_lock_irq(&pool->lock);
-	while (ida_get_new(&pool->worker_ida, &id)) {
+	while (ida_get_new(&pool->worker_ida, &id_in_pool)) {
 		spin_unlock_irq(&pool->lock);
 		if (!ida_pre_get(&pool->worker_ida, GFP_KERNEL))
 			goto fail;
@@ -1738,15 +1738,17 @@ static struct worker *create_worker(struct worker_pool *pool)
 		goto fail;
 
 	worker->pool = pool;
-	worker->id = id;
+	worker->id_in_pool = id_in_pool;
 
 	if (pool->cpu != WORK_CPU_UNBOUND)
 		worker->task = kthread_create_on_node(worker_thread,
 					worker, cpu_to_node(pool->cpu),
-					"kworker/%u:%d%s", pool->cpu, id, pri);
+					"kworker/%u:%d%s", pool->cpu,
+					id_in_pool, pri);
 	else
 		worker->task = kthread_create(worker_thread, worker,
-					      "kworker/u:%d%s", id, pri);
+					      "kworker/u:%d%s",
+					      id_in_pool, pri);
 	if (IS_ERR(worker->task))
 		goto fail;
 
@@ -1771,9 +1773,9 @@ static struct worker *create_worker(struct worker_pool *pool)
 
 	return worker;
 fail:
-	if (id >= 0) {
+	if (id_in_pool >= 0) {
 		spin_lock_irq(&pool->lock);
-		ida_remove(&pool->worker_ida, id);
+		ida_remove(&pool->worker_ida, id_in_pool);
 		spin_unlock_irq(&pool->lock);
 	}
 	kfree(worker);
@@ -1809,7 +1811,7 @@ static void start_worker(struct worker *worker)
 static void destroy_worker(struct worker *worker)
 {
 	struct worker_pool *pool = worker->pool;
-	int id = worker->id;
+	int id_in_pool = worker->id_in_pool;
 
 	/* sanity check frenzy */
 	BUG_ON(worker->current_work);
@@ -1829,7 +1831,7 @@ static void destroy_worker(struct worker *worker)
 	kfree(worker);
 
 	spin_lock_irq(&pool->lock);
-	ida_remove(&pool->worker_ida, id);
+	ida_remove(&pool->worker_ida, id_in_pool);
 }
 
 static void idle_worker_timeout(unsigned long __pool)

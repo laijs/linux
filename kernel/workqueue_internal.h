@@ -35,7 +35,7 @@ struct worker {
 	/* 64 bytes boundary on 64bit, 32 on 32bit */
 	unsigned long		last_active;	/* L: last active timestamp */
 	unsigned int		flags;		/* X: flags */
-	int			id;		/* I: worker id */
+	int			id_in_pool;	/* I: worker id in the pool */
 
 	/* for rebinding worker to CPU */
 	struct work_struct	rebind_work;	/* L: for busy worker */
