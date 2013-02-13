@@ -1139,6 +1139,8 @@ static int try_to_grab_pending(struct work_struct *work, bool is_dwork,
 		goto fail;
 
 	if (cwq) {
+		int pool_id;
+
 		debug_work_deactivate(work);
 
 		/*
@@ -1154,8 +1156,13 @@ static int try_to_grab_pending(struct work_struct *work, bool is_dwork,
 		list_del_init(&work->entry);
 		cwq_dec_nr_in_flight(get_work_cwq(work), get_work_color(work));
 
-		/* work->data points to cwq iff queued, point to pool */
-		set_work_pool_and_keep_pending(work, pool->id);
+		/* work is dequeued, work->data points to pool iff running */
+		if (worker)
+			pool_id = pool->id;
+		else
+			pool_id = WORK_OFFQ_POOL_NONE;
+
+		set_work_pool_and_keep_pending(work, pool_id);
 
 		spin_unlock(&pool->lock);
 		return 1;
