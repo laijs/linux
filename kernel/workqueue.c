@@ -1552,8 +1552,10 @@ static void worker_leave_idle(struct worker *worker)
 }
 
 /**
- * worker_maybe_bind_and_lock - bind worker to its cpu if possible and lock pool
- * @worker: self
+ * worker_maybe_bind_and_lock - bind current worker if possible and lock pool
+ * @pool: target pool
+ *
+ * Bind the worker(of current task) to the cpu of the pool if it is associated.
  *
  * Works which are scheduled while the cpu is online must at least be
  * scheduled to a worker which is bound to the cpu so that if they are
@@ -1581,11 +1583,9 @@ static void worker_leave_idle(struct worker *worker)
  * %true if the associated pool is online (@worker is successfully
  * bound), %false if offline.
  */
-static bool worker_maybe_bind_and_lock(struct worker *worker)
+static bool worker_maybe_bind_and_lock(struct worker_pool *pool)
 __acquires(&pool->lock)
 {
-	struct worker_pool *pool = worker->pool;
-
 	while (true) {
 		/*
 		 * The following call may fail, succeed or succeed
@@ -1623,7 +1623,7 @@ __acquires(&pool->lock)
 static void idle_worker_rebind(struct worker *worker)
 {
 	/* CPU may go down again inbetween, clear UNBOUND only on success */
-	if (worker_maybe_bind_and_lock(worker))
+	if (worker_maybe_bind_and_lock(worker->pool))
 		worker_clr_flags(worker, WORKER_UNBOUND);
 
 	/* rebind complete, become available again */
@@ -1641,7 +1641,7 @@ static void busy_worker_rebind_fn(struct work_struct *work)
 {
 	struct worker *worker = container_of(work, struct worker, rebind_work);
 
-	if (worker_maybe_bind_and_lock(worker))
+	if (worker_maybe_bind_and_lock(worker->pool))
 		worker_clr_flags(worker, WORKER_UNBOUND);
 
 	spin_unlock_irq(&worker->pool->lock);
@@ -2093,7 +2093,7 @@ static bool manage_workers(struct worker *worker)
 		 * on @pool's current state.  Try it and adjust
 		 * %WORKER_UNBOUND accordingly.
 		 */
-		if (worker_maybe_bind_and_lock(worker))
+		if (worker_maybe_bind_and_lock(pool))
 			worker->flags &= ~WORKER_UNBOUND;
 		else
 			worker->flags |= WORKER_UNBOUND;
@@ -2413,7 +2413,7 @@ repeat:
 
 		/* migrate to the target cpu if possible */
 		rescuer->pool = pool;
-		worker_maybe_bind_and_lock(rescuer);
+		worker_maybe_bind_and_lock(pool);
 
 		/*
 		 * Slurp in all works issued via this workqueue and
