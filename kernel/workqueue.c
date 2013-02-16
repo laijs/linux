@@ -1226,7 +1226,7 @@ static void __queue_work(unsigned int cpu, struct workqueue_struct *wq,
 {
 	struct cpu_workqueue_struct *cwq;
 	struct list_head *worklist;
-	unsigned int work_flags;
+	unsigned int color_flags, delayed_flags = 0;
 	unsigned int req_cpu = cpu;
 
 	/*
@@ -1284,18 +1284,18 @@ static void __queue_work(unsigned int cpu, struct workqueue_struct *wq,
 	}
 
 	cwq->nr_in_flight[cwq->work_color]++;
-	work_flags = work_color_to_flags(cwq->work_color);
 
 	if (likely(cwq->nr_active < cwq->max_active)) {
 		trace_workqueue_activate_work(work);
 		cwq->nr_active++;
 		worklist = &cwq->pool->worklist;
 	} else {
-		work_flags |= WORK_STRUCT_DELAYED;
+		delayed_flags = WORK_STRUCT_DELAYED;
 		worklist = &cwq->delayed_works;
 	}
 
-	insert_work(cwq, work, worklist, work_flags);
+	color_flags = work_color_to_flags(cwq->work_color);
+	insert_work(cwq, work, worklist, color_flags | delayed_flags);
 
 	spin_unlock(&cwq->pool->lock);
 }
