@@ -544,9 +544,11 @@ static inline unsigned long worker_id_to_data(int worker_id)
 }
 
 static void set_work_worker_and_keep_pending(struct work_struct *work,
-					     int worker_id)
+					     int worker_id,
+					     unsigned long extra_flags)
 {
-	set_work_data(work, worker_id_to_data(worker_id), WORK_STRUCT_PENDING);
+	set_work_data(work, worker_id_to_data(worker_id),
+			extra_flags | WORK_STRUCT_PENDING);
 }
 
 static void set_work_worker_and_clear_pending(struct work_struct *work,
@@ -1157,7 +1159,7 @@ static int try_to_grab_pending(struct work_struct *work, bool is_dwork,
 		else
 			worker_id = WORK_OFFQ_WORKER_NONE;
 
-		set_work_worker_and_keep_pending(work, worker_id);
+		set_work_worker_and_keep_pending(work, worker_id, 0);
 
 		spin_unlock(&pool->lock);
 		return 1;
