@@ -71,13 +71,14 @@ enum {
 	WORK_OFFQ_FLAG_BASE	= WORK_STRUCT_COLOR_SHIFT,
 
 	WORK_OFFQ_CANCELING	= (1 << WORK_OFFQ_FLAG_BASE),
+	WORK_OFFQ_REQUEUED	= (1 << (WORK_OFFQ_FLAG_BASE + 1)),
 
 	/*
 	 * When a work item starts to be executed, its high bits point to the
 	 * worker it is running on.  Cap at 31 bits and use the highest number
 	 * to indicate that no worker is associated.
 	 */
-	WORK_OFFQ_FLAG_BITS	= 1,
+	WORK_OFFQ_FLAG_BITS	= 2,
 	WORK_OFFQ_WORKER_SHIFT	= WORK_OFFQ_FLAG_BASE + WORK_OFFQ_FLAG_BITS,
 	WORK_OFFQ_LEFT		= BITS_PER_LONG - WORK_OFFQ_WORKER_SHIFT,
 	WORK_OFFQ_WORKER_BITS	= WORK_OFFQ_LEFT <= 31 ? WORK_OFFQ_LEFT : 31,

@@ -39,6 +39,10 @@ struct worker {
 	int			id_in_pool;	/* I: worker id in the pool */
 	int			id;		/* I: worker id (global) */
 
+	/* requeued work */
+	bool			requeue;	/* L: requeued current_work */
+	unsigned int		requeue_color;	/* L: color of requeued work */
+
 	/* for rebinding worker to CPU */
 	struct work_struct	rebind_work;	/* L: for busy worker */
 
