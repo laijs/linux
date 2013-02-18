@@ -2170,7 +2170,6 @@ __acquires(&pool->lock)
 
 	/* claim and dequeue */
 	debug_work_deactivate(work);
-	list_add(&worker->entry, &pool->busy_list);
 	worker->current_work = work;
 	worker->current_func = work->func;
 	worker->current_cwq = cwq;
@@ -2231,7 +2230,6 @@ __acquires(&pool->lock)
 		worker_clr_flags(worker, WORKER_CPU_INTENSIVE);
 
 	/* we're done with it, release */
-	list_del_init(&worker->entry);
 	worker->current_work = NULL;
 	worker->current_func = NULL;
 	worker->current_cwq = NULL;
@@ -2327,6 +2325,7 @@ recheck:
 	 * assumed the manager role.
 	 */
 	worker_clr_flags(worker, WORKER_PREP);
+	list_add(&worker->entry, &pool->busy_list);
 
 	do {
 		struct work_struct *work =
@@ -2344,6 +2343,7 @@ recheck:
 		}
 	} while (keep_working(pool));
 
+	list_del_init(&worker->entry);
 	worker_set_flags(worker, WORKER_PREP, false);
 sleep:
 	if (unlikely(need_to_manage_workers(pool)) && manage_workers(worker))
@@ -2422,6 +2422,7 @@ repeat:
 		/* migrate to the target cpu if possible */
 		worker_maybe_bind_and_lock(pool);
 		rescuer->pool = pool;
+		list_add(&rescuer->entry, &pool->busy_list);
 
 		/*
 		 * Slurp in all works issued via this workqueue and
@@ -2442,6 +2443,7 @@ repeat:
 		if (keep_working(pool))
 			wake_up_worker(pool);
 
+		list_del_init(&rescuer->entry);
 		rescuer->pool = NULL;
 		spin_unlock_irq(&pool->lock);
 	}
