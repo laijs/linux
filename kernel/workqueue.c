@@ -41,7 +41,6 @@
 #include <linux/debug_locks.h>
 #include <linux/lockdep.h>
 #include <linux/idr.h>
-#include <linux/hashtable.h>
 #include <linux/rcupdate.h>
 
 #include "workqueue_internal.h"
@@ -138,9 +137,8 @@ struct worker_pool {
 	struct timer_list	idle_timer;	/* L: worker idle timeout */
 	struct timer_list	mayday_timer;	/* L: SOS timer for workers */
 
-	/* workers are chained either in busy_hash or idle_list */
-	DECLARE_HASHTABLE(busy_hash, BUSY_WORKER_HASH_ORDER);
-						/* L: hash of busy workers */
+	/* workers are chained either in busy_list or idle_list */
+	struct list_head	busy_list;	/* L: list of busy workers */
 
 	struct mutex		assoc_mutex;	/* protect POOL_DISASSOCIATED */
 	struct ida		worker_ida;	/* L: for worker IDs */
@@ -250,8 +248,8 @@ EXPORT_SYMBOL_GPL(system_freezable_wq);
 	for ((pool) = &std_worker_pools(cpu)[0];			\
 	     (pool) < &std_worker_pools(cpu)[NR_STD_WORKER_POOLS]; (pool)++)
 
-#define for_each_busy_worker(worker, i, pos, pool)			\
-	hash_for_each(pool->busy_hash, i, pos, worker, hentry)
+#define for_each_busy_worker(worker, pool)			\
+	list_for_each_entry(worker, &pool->busy_list, entry)
 
 static inline int __next_wq_cpu(int cpu, const struct cpumask *mask,
 				unsigned int sw)
@@ -1499,8 +1497,7 @@ static void worker_enter_idle(struct worker *worker)
 	struct worker_pool *pool = worker->pool;
 
 	BUG_ON(worker->flags & WORKER_IDLE);
-	BUG_ON(!list_empty(&worker->entry) &&
-	       (worker->hentry.next || worker->hentry.pprev));
+	BUG_ON(!list_empty(&worker->entry));
 
 	/* can't use worker_set_flags(), also called from start_worker() */
 	worker->flags |= WORKER_IDLE;
@@ -1664,8 +1661,6 @@ static void busy_worker_rebind_fn(struct work_struct *work)
 static void rebind_workers(struct worker_pool *pool)
 {
 	struct worker *worker, *n;
-	struct hlist_node *pos;
-	int i;
 
 	lockdep_assert_held(&pool->assoc_mutex);
 	lockdep_assert_held(&pool->lock);
@@ -1686,7 +1681,7 @@ static void rebind_workers(struct worker_pool *pool)
 	}
 
 	/* rebind busy workers */
-	for_each_busy_worker(worker, i, pos, pool) {
+	for_each_busy_worker(worker, pool) {
 		struct work_struct *rebind_work = &worker->rebind_work;
 		struct workqueue_struct *wq;
 
@@ -2175,7 +2170,7 @@ __acquires(&pool->lock)
 
 	/* claim and dequeue */
 	debug_work_deactivate(work);
-	hash_add(pool->busy_hash, &worker->hentry, (unsigned long)work);
+	list_add(&worker->entry, &pool->busy_list);
 	worker->current_work = work;
 	worker->current_func = work->func;
 	worker->current_cwq = cwq;
@@ -2236,7 +2231,7 @@ __acquires(&pool->lock)
 		worker_clr_flags(worker, WORKER_CPU_INTENSIVE);
 
 	/* we're done with it, release */
-	hash_del(&worker->hentry);
+	list_del_init(&worker->entry);
 	worker->current_work = NULL;
 	worker->current_func = NULL;
 	worker->current_cwq = NULL;
@@ -3490,8 +3485,6 @@ static void wq_unbind_fn(struct work_struct *work)
 	int cpu = smp_processor_id();
 	struct worker_pool *pool;
 	struct worker *worker;
-	struct hlist_node *pos;
-	int i;
 
 	for_each_std_worker_pool(pool, cpu) {
 		BUG_ON(cpu != smp_processor_id());
@@ -3509,7 +3502,7 @@ static void wq_unbind_fn(struct work_struct *work)
 		list_for_each_entry(worker, &pool->idle_list, entry)
 			worker->flags |= WORKER_UNBOUND;
 
-		for_each_busy_worker(worker, i, pos, pool)
+		for_each_busy_worker(worker, pool)
 			worker->flags |= WORKER_UNBOUND;
 
 		pool->flags |= POOL_DISASSOCIATED;
@@ -3812,7 +3805,7 @@ static int __init init_workqueues(void)
 			pool->flags |= POOL_DISASSOCIATED;
 			INIT_LIST_HEAD(&pool->worklist);
 			INIT_LIST_HEAD(&pool->idle_list);
-			hash_init(pool->busy_hash);
+			INIT_LIST_HEAD(&pool->busy_list);
 
 			init_timer_deferrable(&pool->idle_timer);
 			pool->idle_timer.function = idle_worker_timeout;

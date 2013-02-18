@@ -14,17 +14,14 @@ struct worker_pool;
 
 /*
  * The poor guys doing the actual heavy lifting.  All on-duty workers are
- * either serving the manager role, on idle list or on busy hash.  For
+ * either serving the manager role, on idle list or on busy list.  For
  * details on the locking annotation (L, I, X...), refer to workqueue.c.
  *
  * Only to be used in workqueue and async.
  */
 struct worker {
-	/* on idle list while idle, on busy hash table while busy */
-	union {
-		struct list_head	entry;	/* L: while idle */
-		struct hlist_node	hentry;	/* L: while busy */
-	};
+	/* on idle list while idle, on busy list while busy */
+	struct list_head	entry;		/* L: idle/busy list */
 
 	struct work_struct	*current_work;	/* L: work being processed */
 	work_func_t		current_func;	/* L: current_work's fn */
