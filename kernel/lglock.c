@@ -87,3 +87,55 @@ void lg_global_unlock(struct lglock *lg)
 	preempt_enable();
 }
 EXPORT_SYMBOL(lg_global_unlock);
+
+#define FALLBACK_BASE	(1UL << 30)
+
+void lg_rwlock_local_read_lock(struct lgrwlock *lgrw)
+{
+	struct lglock *lg = &lgrw->lglock;
+
+	preempt_disable();
+	rwlock_acquire_read(&lg->lock_dep_map, 0, 0, _RET_IP_);
+	if (likely(!__this_cpu_read(*lgrw->reader_refcnt))) {
+		if (!arch_spin_trylock(this_cpu_ptr(lg->lock))) {
+			read_lock(&lgrw->fallback_rwlock);
+			__this_cpu_add(*lgrw->reader_refcnt, FALLBACK_BASE);
+		}
+	}
+
+	__this_cpu_inc(*lgrw->reader_refcnt);
+}
+EXPORT_SYMBOL(lg_rwlock_local_read_lock);
+
+void lg_rwlock_local_read_unlock(struct lgrwlock *lgrw)
+{
+	switch (__this_cpu_dec_return(*lgrw->reader_refcnt)) {
+	case 0:
+		lg_local_unlock(&lgrw->lglock);
+		return;
+	case FALLBACK_BASE:
+		__this_cpu_sub(*lgrw->reader_refcnt, FALLBACK_BASE);
+		read_unlock(&lgrw->fallback_rwlock);
+		break;
+	default:
+		break;
+	}
+
+	rwlock_release(&lg->lock_dep_map, 1, _RET_IP_);
+	preempt_enable();
+}
+EXPORT_SYMBOL(lg_rwlock_local_read_unlock);
+
+void lg_rwlock_global_write_lock(struct lgrwlock *lgrw)
+{
+	lg_global_lock(&lgrw->lglock);
+	write_lock(&lgrw->fallback_rwlock);
+}
+EXPORT_SYMBOL(lg_rwlock_global_write_lock);
+
+void lg_rwlock_global_write_unlock(struct lgrwlock *lgrw)
+{
+	write_unlock(&lgrw->fallback_rwlock);
+	lg_global_unlock(&lgrw->lglock);
+}
+EXPORT_SYMBOL(lg_rwlock_global_write_unlock);
