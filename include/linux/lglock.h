@@ -67,4 +67,35 @@ void lg_local_unlock_cpu(struct lglock *lg, int cpu);
 void lg_global_lock(struct lglock *lg);
 void lg_global_unlock(struct lglock *lg);
 
+struct lgrwlock {
+	unsigned long __percpu *reader_refcnt;
+	struct lglock lglock;
+	rwlock_t fallback_rwlock;
+};
+
+#define DEFINE_LGRWLOCK(name)						\
+	static DEFINE_PER_CPU(arch_spinlock_t, name ## _lock)		\
+	= __ARCH_SPIN_LOCK_UNLOCKED;					\
+	static DEFINE_PER_CPU(unsigned long, name ## _refcnt);		\
+	struct lgrwlock name = {					\
+		.reader_refcnt = &name ## _refcnt,			\
+		.lglock = { .lock = &name ## _lock } }
+
+#define DEFINE_STATIC_LGRWLOCK(name)					\
+	static DEFINE_PER_CPU(arch_spinlock_t, name ## _lock)		\
+	= __ARCH_SPIN_LOCK_UNLOCKED;					\
+	static DEFINE_PER_CPU(unsigned long, name ## _refcnt);		\
+	static struct lgrwlock name = {					\
+		.reader_refcnt = &name ## _refcnt,			\
+		.lglock = { .lock = &name ## _lock } }
+
+static inline void lg_rwlock_init(struct lgrwlock *lgrw, char *name)
+{
+	lg_lock_init(&lgrw->lglock, name);
+}
+
+void lg_rwlock_local_read_lock(struct lgrwlock *lgrw);
+void lg_rwlock_local_read_unlock(struct lgrwlock *lgrw);
+void lg_rwlock_global_write_lock(struct lgrwlock *lgrw);
+void lg_rwlock_global_write_unlock(struct lgrwlock *lgrw);
 #endif
