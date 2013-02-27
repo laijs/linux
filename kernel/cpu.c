@@ -19,6 +19,7 @@
 #include <linux/mutex.h>
 #include <linux/gfp.h>
 #include <linux/suspend.h>
+#include <linux/lglock.h>
 
 #include "smpboot.h"
 
@@ -539,6 +540,32 @@ static int __init alloc_frozen_cpus(void)
 	return 0;
 }
 core_initcall(alloc_frozen_cpus);
+
+DEFINE_STATIC_LGRWLOCK(cpu_hotplug_atomic);
+
+void get_online_cpus_atomic(void)
+{
+	lg_rwlock_local_read_lock(&cpu_hotplug_atomic);
+}
+EXPORT_SYMBOL_GPL(get_online_cpus_atomic);
+
+void put_online_cpus_atomic(void)
+{
+	lg_rwlock_local_read_unlock(&cpu_hotplug_atomic);
+}
+EXPORT_SYMBOL_GPL(put_online_cpus_atomic);
+
+static void cpu_hotplug_write_lock_atomic(void)
+{
+	lg_rwlock_global_write_lock(&cpu_hotplug_atomic);
+	__this_cpu_inc(*cpu_hotplug_atomic.reader_refcnt); /* allow reader */
+}
+
+static void cpu_hotplug_write_unlock_atomic(void)
+{
+	__this_cpu_dec(*cpu_hotplug_atomic.reader_refcnt); /* allow reader */
+	lg_rwlock_global_write_unlock(&cpu_hotplug_atomic);
+}
 
 /*
  * Prevent regular CPU hotplug from racing with the freezer, by disabling CPU
