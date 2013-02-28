@@ -32,6 +32,7 @@
 #include <linux/gfp.h>
 #include <linux/suspend.h>
 #include <linux/percpu-rwlock.h>
+#include <linux/lglock.h>
 
 #include "smpboot.h"
 
@@ -146,38 +147,6 @@ static void cpu_hotplug_done(void)
 	mutex_unlock(&cpu_hotplug.lock);
 }
 
-/*
- * Per-CPU Reader-Writer lock to synchronize between atomic hotplug
- * readers and the CPU offline hotplug writer.
- */
-DEFINE_STATIC_PERCPU_RWLOCK(hotplug_pcpu_rwlock);
-
-/*
- * Invoked by atomic hotplug reader (a task which wants to prevent
- * CPU offline, but which can't afford to sleep), to prevent CPUs from
- * going offline. So, you can call this function from atomic contexts
- * (including interrupt handlers).
- *
- * Note: This does NOT prevent CPUs from coming online! It only prevents
- * CPUs from going offline.
- *
- * You can call this function recursively.
- *
- * Returns with preemption disabled (but interrupts remain as they are;
- * they are not disabled).
- */
-void get_online_cpus_atomic(void)
-{
-	percpu_read_lock_irqsafe(&hotplug_pcpu_rwlock);
-}
-EXPORT_SYMBOL_GPL(get_online_cpus_atomic);
-
-void put_online_cpus_atomic(void)
-{
-	percpu_read_unlock_irqsafe(&hotplug_pcpu_rwlock);
-}
-EXPORT_SYMBOL_GPL(put_online_cpus_atomic);
-
 #else /* #if CONFIG_HOTPLUG_CPU */
 static void cpu_hotplug_begin(void) {}
 static void cpu_hotplug_done(void) {}
@@ -282,6 +251,32 @@ static inline void check_for_tasks(int cpu)
 	write_unlock_irq(&tasklist_lock);
 }
 
+DEFINE_STATIC_LGRWLOCK(cpu_hotplug_atomic);
+
+void get_online_cpus_atomic(void)
+{
+	lg_rwlock_local_read_lock(&cpu_hotplug_atomic);
+}
+EXPORT_SYMBOL_GPL(get_online_cpus_atomic);
+
+void put_online_cpus_atomic(void)
+{
+	lg_rwlock_local_read_unlock(&cpu_hotplug_atomic);
+}
+EXPORT_SYMBOL_GPL(put_online_cpus_atomic);
+
+static void cpu_hotplug_write_lock_atomic(void)
+{
+	lg_rwlock_global_write_lock(&cpu_hotplug_atomic);
+	__this_cpu_inc(*cpu_hotplug_atomic.reader_refcnt); /* allow reader */
+}
+
+static void cpu_hotplug_write_unlock_atomic(void)
+{
+	__this_cpu_dec(*cpu_hotplug_atomic.reader_refcnt); /* allow reader */
+	lg_rwlock_global_write_unlock(&cpu_hotplug_atomic);
+}
+
 struct take_cpu_down_param {
 	unsigned long mod;
 	void *hcpu;
@@ -294,7 +289,8 @@ static int __ref take_cpu_down(void *_param)
 	unsigned long flags;
 	int err;
 
-	percpu_write_lock_irqsave(&hotplug_pcpu_rwlock, &flags);
+	local_irq_save(flags);
+	cpu_hotplug_write_lock_atomic();
 
 	/* Ensure this CPU doesn't handle any more interrupts. */
 	err = __cpu_disable();
@@ -304,7 +300,8 @@ static int __ref take_cpu_down(void *_param)
 	cpu_notify(CPU_DYING | param->mod, param->hcpu);
 
 out:
-	percpu_write_unlock_irqrestore(&hotplug_pcpu_rwlock, &flags);
+	cpu_hotplug_write_unlock_atomic();
+	local_irq_restore(flags);
 	return err;
 }
 
