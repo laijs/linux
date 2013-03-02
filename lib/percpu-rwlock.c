@@ -26,6 +26,7 @@
 #include <linux/lockdep.h>
 #include <linux/percpu-rwlock.h>
 #include <linux/errno.h>
+#include <linux/export.h>
 
 #include <asm/processor.h>
 
@@ -66,6 +67,7 @@ int __percpu_init_rwlock(struct percpu_rwlock *pcpu_rwlock,
 #endif
 	return 0;
 }
+EXPORT_SYMBOL_GPL(__percpu_init_rwlock);
 
 void percpu_free_rwlock(struct percpu_rwlock *pcpu_rwlock)
 {
@@ -74,6 +76,7 @@ void percpu_free_rwlock(struct percpu_rwlock *pcpu_rwlock)
 	/* Catch use-after-free bugs */
 	pcpu_rwlock->rw_state = NULL;
 }
+EXPORT_SYMBOL_GPL(percpu_free_rwlock);
 
 void percpu_read_lock_irqsafe(struct percpu_rwlock *pcpu_rwlock)
 {
@@ -144,6 +147,7 @@ void percpu_read_lock_irqsafe(struct percpu_rwlock *pcpu_rwlock)
 	/* Prevent reordering of any subsequent reads/writes */
 	smp_mb();
 }
+EXPORT_SYMBOL_GPL(percpu_read_lock_irqsafe);
 
 void percpu_read_unlock_irqsafe(struct percpu_rwlock *pcpu_rwlock)
 {
@@ -185,6 +189,7 @@ void percpu_read_unlock_irqsafe(struct percpu_rwlock *pcpu_rwlock)
 
 	preempt_enable();
 }
+EXPORT_SYMBOL_GPL(percpu_read_unlock_irqsafe);
 
 void percpu_write_lock_irqsave(struct percpu_rwlock *pcpu_rwlock,
 			       unsigned long *flags)
@@ -228,6 +233,7 @@ void percpu_write_lock_irqsave(struct percpu_rwlock *pcpu_rwlock,
 	 */
 	this_cpu_inc(pcpu_rwlock->rw_state->reader_refcnt);
 }
+EXPORT_SYMBOL_GPL(percpu_write_lock_irqsave);
 
 void percpu_write_unlock_irqrestore(struct percpu_rwlock *pcpu_rwlock,
 				    unsigned long *flags)
@@ -253,4 +259,5 @@ void percpu_write_unlock_irqrestore(struct percpu_rwlock *pcpu_rwlock,
 
 	write_unlock_irqrestore(&pcpu_rwlock->global_rwlock, *flags);
 }
+EXPORT_SYMBOL_GPL(percpu_write_unlock_irqrestore);
 
