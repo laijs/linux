@@ -298,7 +298,7 @@ EXPORT_SYMBOL_GPL(fsnotify);
 
 static __init int fsnotify_init(void)
 {
-	BUG_ON(hweight32(ALL_FSNOTIFY_EVENTS) != 23);
+	BUILD_BUG_ON(HWEIGHT32(ALL_FSNOTIFY_EVENTS) != 23);
 
 	return 0;
 }
