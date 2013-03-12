@@ -97,7 +97,7 @@
 #include <linux/fsnotify_backend.h>
 #include "fsnotify.h"
 
-struct srcu_struct fsnotify_mark_srcu;
+DEFINE_SRCU(fsnotify_mark_srcu);
 static DEFINE_SPINLOCK(destroy_lock);
 static LIST_HEAD(destroy_list);
 static DECLARE_WAIT_QUEUE_HEAD(destroy_waitq);
