@@ -295,11 +295,3 @@ out:
 	return ret;
 }
 EXPORT_SYMBOL_GPL(fsnotify);
-
-static __init int fsnotify_init(void)
-{
-	BUILD_BUG_ON(HWEIGHT32(ALL_FSNOTIFY_EVENTS) != 23);
-
-	return 0;
-}
-core_initcall(fsnotify_init);

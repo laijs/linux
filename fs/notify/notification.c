@@ -453,6 +453,8 @@ static __init int fsnotify_notification_init(void)
 	fsnotify_event_cachep = KMEM_CACHE(fsnotify_event, SLAB_PANIC);
 	fsnotify_event_holder_cachep = KMEM_CACHE(fsnotify_event_holder, SLAB_PANIC);
 
+	BUILD_BUG_ON(HWEIGHT32(ALL_FSNOTIFY_EVENTS) != 23);
+
 	q_overflow_event = fsnotify_create_event(NULL, FS_Q_OVERFLOW, NULL,
 						 FSNOTIFY_EVENT_NONE, NULL, 0,
 						 GFP_KERNEL);
