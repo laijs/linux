@@ -146,7 +146,7 @@ static atomic_t nr_task_events __read_mostly;
 
 static LIST_HEAD(pmus);
 static DEFINE_MUTEX(pmus_lock);
-static struct srcu_struct pmus_srcu;
+DEFINE_STATIC_SRCU(pmus_srcu);
 
 /*
  * perf event paranoia level:
@@ -7396,7 +7396,6 @@ void __init perf_event_init(void)
 	idr_init(&pmu_idr);
 
 	perf_event_init_all_cpus();
-	init_srcu_struct(&pmus_srcu);
 	perf_pmu_register(&perf_swevent, "software", PERF_TYPE_SOFTWARE);
 	perf_pmu_register(&perf_cpu_clock, NULL, -1);
 	perf_pmu_register(&perf_task_clock, NULL, -1);
