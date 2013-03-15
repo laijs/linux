@@ -20,7 +20,7 @@
 #include <linux/slab.h>
 
 /* global SRCU for all MMs */
-static struct srcu_struct srcu;
+DEFINE_STATIC_SRCU(srcu);
 
 /*
  * This function can't run concurrently against mmu_notifier_register
@@ -326,9 +326,3 @@ void mmu_notifier_unregister(struct mmu_notifier *mn, struct mm_struct *mm)
 }
 EXPORT_SYMBOL_GPL(mmu_notifier_unregister);
 
-static int __init mmu_notifier_init(void)
-{
-	return init_srcu_struct(&srcu);
-}
-
-module_init(mmu_notifier_init);
