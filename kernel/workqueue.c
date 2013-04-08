@@ -77,9 +77,11 @@ enum {
 	WORKER_CPU_INTENSIVE	= 1 << 6,	/* cpu intensive */
 	WORKER_UNBOUND		= 1 << 7,	/* worker is unbound */
 	WORKER_REBOUND		= 1 << 8,	/* worker was rebound */
+	WORKER_RESCUER		= 1 << 9,	/* rescuer thread */
 
 	WORKER_NOT_RUNNING	= WORKER_PREP | WORKER_CPU_INTENSIVE |
-				  WORKER_UNBOUND | WORKER_REBOUND,
+				  WORKER_UNBOUND | WORKER_REBOUND |
+				  WORKER_RESCUER,
 
 	NR_STD_WORKER_POOLS	= 2,		/* # standard pools per cpu */
 
@@ -1655,8 +1657,6 @@ static struct worker *alloc_worker(void)
 	if (worker) {
 		INIT_LIST_HEAD(&worker->entry);
 		INIT_LIST_HEAD(&worker->scheduled);
-		/* on creation a worker is in !idle && prep state */
-		worker->flags = WORKER_PREP;
 	}
 	return worker;
 }
@@ -1761,6 +1761,7 @@ fail:
  */
 static void start_worker(struct worker *worker)
 {
+	worker->flags |= WORKER_PREP;
 	worker->pool->nr_workers++;
 	worker_enter_idle(worker);
 	wake_up_process(worker->task);
@@ -2331,10 +2332,11 @@ static int rescuer_thread(void *__rescuer)
 	struct workqueue_struct *wq = rescuer->rescue_wq;
 	struct list_head *scheduled = &rescuer->scheduled;
 
+	rescuer->flags |= WORKER_RESCUER;
 	set_user_nice(current, RESCUER_NICE_LEVEL);
 
 	/*
-	 * Mark rescuer as worker too.  As WORKER_PREP is never cleared, it
+	 * Mark rescuer as worker too.  As WORKER_RESCUER is never cleared, it
 	 * doesn't participate in concurrency management.
 	 */
 	rescuer->task->flags |= PF_WQ_WORKER;
