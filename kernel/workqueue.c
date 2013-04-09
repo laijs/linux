@@ -783,27 +783,6 @@ static void wake_up_worker(struct worker_pool *pool)
 }
 
 /**
- * wq_worker_waking_up - a worker is waking up
- * @task: task waking up
- * @cpu: CPU @task is waking up to
- *
- * This function is called during try_to_wake_up() when a worker is
- * being awoken.
- *
- * CONTEXT:
- * spin_lock_irq(rq->lock)
- */
-void wq_worker_waking_up(struct task_struct *task, int cpu)
-{
-	struct worker *worker = kthread_data(task);
-
-	if (!worker->flags) {
-		WARN_ON_ONCE(worker->pool->cpu != cpu);
-		atomic_inc(&worker->pool->nr_cm_workers);
-	}
-}
-
-/**
  * wq_worker_sleeping - a worker is going to sleep
  * @task: task going to sleep
  *
@@ -4368,19 +4347,8 @@ static void wq_unbind_fn(struct work_struct *work)
 
 		pool->flags |= POOL_DISASSOCIATED;
 
-		spin_unlock_irq(&pool->lock);
-		mutex_unlock(&pool->manager_mutex);
-
 		/*
-		 * Call schedule() so that we cross rq->lock and thus can
-		 * guarantee sched callbacks see the %WORKER_UNBOUND flag.
-		 * This is necessary as scheduler callbacks may be invoked
-		 * from other cpus.
-		 */
-		schedule();
-
-		/*
-		 * Sched callbacks are disabled now.  Zap nr_cm_workers.
+		 * Zap nr_cm_workers.
 		 * After this, nr_cm_workers stays zero and need_more_worker()
 		 * and keep_working() are always true as long as the
 		 * worklist is not empty.  This pool now behaves as an
@@ -4394,9 +4362,9 @@ static void wq_unbind_fn(struct work_struct *work)
 		 * worker blocking could lead to lengthy stalls.  Kick off
 		 * unbound chain execution of currently pending work items.
 		 */
-		spin_lock_irq(&pool->lock);
 		wake_up_worker(pool);
 		spin_unlock_irq(&pool->lock);
+		mutex_unlock(&pool->manager_mutex);
 	}
 }
 
@@ -4427,8 +4395,6 @@ static void rebind_workers(struct worker_pool *pool)
 	spin_lock_irq(&pool->lock);
 
 	for_each_pool_worker(worker, wi, pool) {
-		unsigned int worker_flags = worker->flags;
-
 		/*
 		 * A bound idle worker should actually be on the runqueue
 		 * of the associated CPU for local wake-ups targeting it to
@@ -4437,7 +4403,7 @@ static void rebind_workers(struct worker_pool *pool)
 		 * replacing UNBOUND with REBOUND is safe as no worker will
 		 * be bound before @pool->lock is released.
 		 */
-		if (worker_flags & WORKER_IDLE)
+		if (worker->flags & WORKER_IDLE)
 			wake_up_process(worker->task);
 
 		/*
@@ -4448,17 +4414,10 @@ static void rebind_workers(struct worker_pool *pool)
 		 * it initiates the next execution cycle thus restoring
 		 * concurrency management.  Note that when or whether
 		 * @worker clears REBOUND doesn't affect correctness.
-		 *
-		 * ACCESS_ONCE() is necessary because @worker->flags may be
-		 * tested without holding any lock in wq_worker_waking_up().
-		 * Without it, the test to @worker->flags may
-		 * fail incorrectly leading to premature concurrency
-		 * management operations.
 		 */
-		WARN_ON_ONCE(!(worker_flags & WORKER_UNBOUND));
-		worker_flags |= WORKER_REBOUND;
-		worker_flags &= ~WORKER_UNBOUND;
-		ACCESS_ONCE(worker->flags) = worker_flags;
+		WARN_ON_ONCE(!(worker->flags & WORKER_UNBOUND));
+		worker->flags |= WORKER_REBOUND;
+		worker->flags &= ~WORKER_UNBOUND;
 	}
 
 	spin_unlock_irq(&pool->lock);
