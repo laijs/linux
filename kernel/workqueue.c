@@ -70,7 +70,7 @@ enum {
 	POOL_DISASSOCIATED	= 1 << 2,	/* cpu can't serve workers */
 	POOL_FREEZING		= 1 << 3,	/* freeze in progress */
 
-	/* worker flags */
+	/* worker flags for why the worker is not concurrency managed */
 	WORKER_DIE		= 1 << 1,	/* die die die */
 	WORKER_IDLE		= 1 << 2,	/* is idle */
 	WORKER_PREP		= 1 << 3,	/* preparing to run works */
@@ -78,10 +78,6 @@ enum {
 	WORKER_UNBOUND		= 1 << 7,	/* worker is unbound */
 	WORKER_REBOUND		= 1 << 8,	/* worker was rebound */
 	WORKER_RESCUER		= 1 << 9,	/* rescuer thread */
-
-	WORKER_NOT_RUNNING	= WORKER_PREP | WORKER_CPU_INTENSIVE |
-				  WORKER_UNBOUND | WORKER_REBOUND |
-				  WORKER_RESCUER,
 
 	NR_STD_WORKER_POOLS	= 2,		/* # standard pools per cpu */
 
@@ -799,7 +795,7 @@ void wq_worker_waking_up(struct task_struct *task, int cpu)
 {
 	struct worker *worker = kthread_data(task);
 
-	if (!(worker->flags & WORKER_NOT_RUNNING)) {
+	if (!worker->flags) {
 		WARN_ON_ONCE(worker->pool->cpu != cpu);
 		atomic_inc(&worker->pool->nr_running);
 	}
@@ -827,9 +823,9 @@ struct task_struct *wq_worker_sleeping(struct task_struct *task)
 	/*
 	 * Rescuers, which may not have all the fields set up like normal
 	 * workers, also reach here, let's not access anything before
-	 * checking NOT_RUNNING.
+	 * checking ->flags.
 	 */
-	if (worker->flags & WORKER_NOT_RUNNING)
+	if (worker->flags)
 		return NULL;
 
 	pool = worker->pool;
@@ -843,7 +839,7 @@ struct task_struct *wq_worker_sleeping(struct task_struct *task)
 	 * worklist not empty test sequence is in insert_work().
 	 * Please read comment there.
 	 *
-	 * NOT_RUNNING is clear.  This means that we're bound to and
+	 * @worker->flags == 0 is clear.  This means that we're bound to and
 	 * running on the local cpu w/ rq lock held and preemption
 	 * disabled, which in turn means that none else could be
 	 * manipulating idle_list, so dereferencing idle_list without pool
@@ -874,14 +870,15 @@ static inline void worker_set_flags(struct worker *worker, unsigned int flags,
 	struct worker_pool *pool = worker->pool;
 
 	WARN_ON_ONCE(worker->task != current);
+	if (WARN_ON_ONCE(!flags))
+		return;
 
 	/*
-	 * If transitioning into NOT_RUNNING, adjust nr_running and
-	 * wake up an idle worker as necessary if requested by
+	 * If transitioning into concurrency managed worker, adjust nr_running
+	 * and wake up an idle worker as necessary if requested by
 	 * @wakeup.
 	 */
-	if ((flags & WORKER_NOT_RUNNING) &&
-	    !(worker->flags & WORKER_NOT_RUNNING)) {
+	if (!worker->flags) {
 		if (wakeup) {
 			if (atomic_dec_and_test(&pool->nr_running) &&
 			    !list_empty(&pool->worklist))
@@ -906,20 +903,12 @@ static inline void worker_set_flags(struct worker *worker, unsigned int flags,
 static inline void worker_clr_flags(struct worker *worker, unsigned int flags)
 {
 	struct worker_pool *pool = worker->pool;
-	unsigned int oflags = worker->flags;
 
 	WARN_ON_ONCE(worker->task != current);
 
 	worker->flags &= ~flags;
-
-	/*
-	 * If transitioning out of NOT_RUNNING, increment nr_running.  Note
-	 * that the nested NOT_RUNNING is not a noop.  NOT_RUNNING is mask
-	 * of multiple flags, not a single flag.
-	 */
-	if ((flags & WORKER_NOT_RUNNING) && (oflags & WORKER_NOT_RUNNING))
-		if (!(worker->flags & WORKER_NOT_RUNNING))
-			atomic_inc(&pool->nr_running);
+	if (!worker->flags)
+		atomic_inc(&pool->nr_running);
 }
 
 /**
@@ -2394,7 +2383,7 @@ repeat:
 	spin_unlock_irq(&wq_mayday_lock);
 
 	/* rescuers should never participate in concurrency management */
-	WARN_ON_ONCE(!(rescuer->flags & WORKER_NOT_RUNNING));
+	WARN_ON_ONCE(!rescuer->flags);
 	schedule();
 	goto repeat;
 }
@@ -4478,15 +4467,15 @@ static void rebind_workers(struct worker_pool *pool)
 		/*
 		 * We want to clear UNBOUND but can't directly call
 		 * worker_clr_flags() or adjust nr_running.  Atomically
-		 * replace UNBOUND with another NOT_RUNNING flag REBOUND.
+		 * replace UNBOUND with another flag REBOUND.
 		 * @worker will clear REBOUND using worker_clr_flags() when
 		 * it initiates the next execution cycle thus restoring
 		 * concurrency management.  Note that when or whether
 		 * @worker clears REBOUND doesn't affect correctness.
 		 *
 		 * ACCESS_ONCE() is necessary because @worker->flags may be
-		 * tested without holding any lock in
-		 * wq_worker_waking_up().  Without it, NOT_RUNNING test may
+		 * tested without holding any lock in wq_worker_waking_up().
+		 * Without it, the test to @worker->flags may
 		 * fail incorrectly leading to premature concurrency
 		 * management operations.
 		 */
