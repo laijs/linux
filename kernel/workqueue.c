@@ -64,7 +64,7 @@ enum {
 	 *
 	 * Note that DISASSOCIATED should be flipped only while holding
 	 * manager_mutex to avoid changing binding state while
-	 * create_worker() is in progress.
+	 * create_and_start_worker_locked() is in progress.
 	 */
 	POOL_MANAGE_WORKERS	= 1 << 0,	/* need to manage workers */
 	POOL_DISASSOCIATED	= 1 << 2,	/* cpu can't serve workers */
@@ -1542,7 +1542,10 @@ static void worker_enter_idle(struct worker *worker)
 			 (worker->hentry.next || worker->hentry.pprev)))
 		return;
 
-	/* can't use worker_set_flags(), also called from start_worker() */
+	/*
+	 * can't use worker_set_flags(), also called from
+	 * create_and_start_worker_locked().
+	 */
 	worker->flags |= WORKER_IDLE;
 	pool->nr_idle++;
 	worker->last_active = jiffies;
@@ -1663,12 +1666,10 @@ static struct worker *alloc_worker(void)
 }
 
 /**
- * create_worker - create a new workqueue worker
+ * create_and_start_worker_locked - create and start a worker for a pool
  * @pool: pool the new worker will belong to
  *
- * Create a new worker which is bound to @pool.  The returned worker
- * can be started by calling start_worker() or destroyed using
- * destroy_worker().
+ * Create a new worker which is bound to @pool and start it.
  *
  * CONTEXT:
  * Might sleep.  Does GFP_KERNEL allocations.
@@ -1676,7 +1677,7 @@ static struct worker *alloc_worker(void)
  * RETURNS:
  * Pointer to the newly created worker.
  */
-static struct worker *create_worker(struct worker_pool *pool)
+static struct worker *create_and_start_worker_locked(struct worker_pool *pool)
 {
 	struct worker *worker = NULL;
 	int id = -1;
@@ -1734,9 +1735,15 @@ static struct worker *create_worker(struct worker_pool *pool)
 	if (pool->flags & POOL_DISASSOCIATED)
 		worker->flags |= WORKER_UNBOUND;
 
-	/* successful, commit the pointer to idr */
 	spin_lock_irq(&pool->lock);
+	/* successful, commit the pointer to idr */
 	idr_replace(&pool->worker_idr, worker, worker->id);
+
+	/* start worker */
+	worker->flags |= WORKER_STARTED;
+	worker->pool->nr_workers++;
+	worker_enter_idle(worker);
+	wake_up_process(worker->task);
 	spin_unlock_irq(&pool->lock);
 
 	return worker;
@@ -1752,23 +1759,6 @@ fail:
 }
 
 /**
- * start_worker - start a newly created worker
- * @worker: worker to start
- *
- * Make the pool aware of @worker and start it.
- *
- * CONTEXT:
- * spin_lock_irq(pool->lock).
- */
-static void start_worker(struct worker *worker)
-{
-	worker->flags |= WORKER_STARTED;
-	worker->pool->nr_workers++;
-	worker_enter_idle(worker);
-	wake_up_process(worker->task);
-}
-
-/**
  * create_and_start_worker - create and start a worker for a pool
  * @pool: the target pool
  *
@@ -1779,14 +1769,7 @@ static int create_and_start_worker(struct worker_pool *pool)
 	struct worker *worker;
 
 	mutex_lock(&pool->manager_mutex);
-
-	worker = create_worker(pool);
-	if (worker) {
-		spin_lock_irq(&pool->lock);
-		start_worker(worker);
-		spin_unlock_irq(&pool->lock);
-	}
-
+	worker = create_and_start_worker_locked(pool);
 	mutex_unlock(&pool->manager_mutex);
 
 	return worker ? 0 : -ENOMEM;
@@ -1934,17 +1917,8 @@ restart:
 	mod_timer(&pool->mayday_timer, jiffies + MAYDAY_INITIAL_TIMEOUT);
 
 	while (true) {
-		struct worker *worker;
-
-		worker = create_worker(pool);
-		if (worker) {
-			del_timer_sync(&pool->mayday_timer);
-			spin_lock_irq(&pool->lock);
-			start_worker(worker);
-			if (WARN_ON_ONCE(need_to_create_worker(pool)))
-				goto restart;
-			return true;
-		}
+		if (create_and_start_worker_locked(pool))
+			break;
 
 		if (!need_to_create_worker(pool))
 			break;
