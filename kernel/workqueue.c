@@ -71,6 +71,7 @@ enum {
 	POOL_FREEZING		= 1 << 3,	/* freeze in progress */
 
 	/* worker flags for why the worker is not concurrency managed */
+	WORKER_QUIT_CM		= 1 << 0,	/* quit concurrency managed */
 	WORKER_DIE		= 1 << 1,	/* die die die */
 	WORKER_IDLE		= 1 << 2,	/* is idle */
 	WORKER_PREP		= 1 << 3,	/* preparing to run works */
@@ -114,10 +115,11 @@ enum {
  *
  * L: pool->lock protected.  Access with pool->lock held.
  *
- * X: During normal operation, modification requires pool->lock and should
- *    be done only from local cpu.  Either disabling preemption on local
- *    cpu or grabbing pool->lock is enough for read access.  If
- *    POOL_DISASSOCIATED is set, it's identical to L.
+ * X: During normal operation, modification requires (pool->lock or
+ *    rq lock) and should be done only from local cpu.
+ *    Either disabling preemption on local cpu or grabbing pool->lock
+ *    or grabbing rq lock is enough for read access.
+ *    If POOL_DISASSOCIATED is set, it's identical to L.
  *
  * MG: pool->manager_mutex and pool->lock protected.  Writes require both
  *     locks.  Reads can happen under either lock.
@@ -833,6 +835,8 @@ struct task_struct *wq_worker_sleeping(struct task_struct *task)
 	/* this can only happen on the local cpu */
 	if (WARN_ON_ONCE(pool->cpu != raw_smp_processor_id()))
 		return NULL;
+
+	worker->flags = WORKER_QUIT_CM;
 
 	/*
 	 * The counterpart of the following dec_and_test, implied mb,
@@ -2147,8 +2151,8 @@ __acquires(&pool->lock)
 
 	spin_lock_irq(&pool->lock);
 
-	/* clear cpu intensive status if it is set */
-	worker_clr_flags(worker, WORKER_CPU_INTENSIVE);
+	/* clear cpu intensive status or WORKER_QUIT_CM if it is set */
+	worker_clr_flags(worker, WORKER_CPU_INTENSIVE | WORKER_QUIT_CM);
 
 	/* we're done with it, release */
 	hash_del(&worker->hentry);
