@@ -166,11 +166,11 @@ struct worker_pool {
 	int			refcnt;		/* PL: refcnt for unbound pools */
 
 	/*
-	 * The current concurrency level.  As it's likely to be accessed
-	 * from other CPUs during try_to_wake_up(), put it in a separate
-	 * cacheline.
+	 * The nummber of current concurrency managed workers.
+	 * As it's likely to be accessed from other CPUs during
+	 * try_to_wake_up(), put it in a separate cacheline.
 	 */
-	atomic_t		nr_running ____cacheline_aligned_in_smp;
+	atomic_t		nr_cm_workers ____cacheline_aligned_in_smp;
 
 	/*
 	 * Destruction of pool is sched-RCU protected to allow dereferences
@@ -691,14 +691,14 @@ static bool work_is_canceling(struct work_struct *work)
 
 static bool __need_more_worker(struct worker_pool *pool)
 {
-	return !atomic_read(&pool->nr_running);
+	return !atomic_read(&pool->nr_cm_workers);
 }
 
 /*
  * Need to wake up a worker?  Called from anything but currently
  * running workers.
  *
- * Note that, because unbound workers never contribute to nr_running, this
+ * Note that, because unbound workers never contribute to nr_cm_workers, this
  * function will always return %true for unbound pools as long as the
  * worklist isn't empty.
  */
@@ -717,7 +717,7 @@ static bool may_start_working(struct worker_pool *pool)
 static bool keep_working(struct worker_pool *pool)
 {
 	return !list_empty(&pool->worklist) &&
-		atomic_read(&pool->nr_running) <= 1;
+		atomic_read(&pool->nr_cm_workers) <= 1;
 }
 
 /* Do we need a new worker?  Called from manager. */
@@ -797,7 +797,7 @@ void wq_worker_waking_up(struct task_struct *task, int cpu)
 
 	if (!worker->flags) {
 		WARN_ON_ONCE(worker->pool->cpu != cpu);
-		atomic_inc(&worker->pool->nr_running);
+		atomic_inc(&worker->pool->nr_cm_workers);
 	}
 }
 
@@ -845,20 +845,20 @@ struct task_struct *wq_worker_sleeping(struct task_struct *task)
 	 * manipulating idle_list, so dereferencing idle_list without pool
 	 * lock is safe.
 	 */
-	if (atomic_dec_and_test(&pool->nr_running) &&
+	if (atomic_dec_and_test(&pool->nr_cm_workers) &&
 	    !list_empty(&pool->worklist))
 		to_wakeup = first_worker(pool);
 	return to_wakeup ? to_wakeup->task : NULL;
 }
 
 /**
- * worker_set_flags - set worker flags and adjust nr_running accordingly
+ * worker_set_flags - set worker flags and adjust nr_cm_workers accordingly
  * @worker: self
  * @flags: flags to set
  * @wakeup: wakeup an idle worker if necessary
  *
- * Set @flags in @worker->flags and adjust nr_running accordingly.  If
- * nr_running becomes zero and @wakeup is %true, an idle worker is
+ * Set @flags in @worker->flags and adjust nr_cm_workers accordingly.  If
+ * nr_cm_workers becomes zero and @wakeup is %true, an idle worker is
  * woken up.
  *
  * CONTEXT:
@@ -874,28 +874,28 @@ static inline void worker_set_flags(struct worker *worker, unsigned int flags,
 		return;
 
 	/*
-	 * If transitioning into concurrency managed worker, adjust nr_running
-	 * and wake up an idle worker as necessary if requested by
-	 * @wakeup.
+	 * If transitioning into concurrency managed worker, adjust
+	 * nr_cm_workers and wake up an idle worker as necessary
+	 * if requested by @wakeup.
 	 */
 	if (!worker->flags) {
 		if (wakeup) {
-			if (atomic_dec_and_test(&pool->nr_running) &&
+			if (atomic_dec_and_test(&pool->nr_cm_workers) &&
 			    !list_empty(&pool->worklist))
 				wake_up_worker(pool);
 		} else
-			atomic_dec(&pool->nr_running);
+			atomic_dec(&pool->nr_cm_workers);
 	}
 
 	worker->flags |= flags;
 }
 
 /**
- * worker_clr_flags - clear worker flags and adjust nr_running accordingly
+ * worker_clr_flags - clear worker flags and adjust nr_cm_workers accordingly
  * @worker: self
  * @flags: flags to clear
  *
- * Clear @flags in @worker->flags and adjust nr_running accordingly.
+ * Clear @flags in @worker->flags and adjust nr_cm_workers accordingly.
  *
  * CONTEXT:
  * spin_lock_irq(pool->lock)
@@ -908,7 +908,7 @@ static inline void worker_clr_flags(struct worker *worker, unsigned int flags)
 
 	worker->flags &= ~flags;
 	if (!worker->flags)
-		atomic_inc(&pool->nr_running);
+		atomic_inc(&pool->nr_cm_workers);
 }
 
 /**
@@ -1246,7 +1246,7 @@ static void insert_work(struct pool_workqueue *pwq, struct work_struct *work,
 
 	/*
 	 * Ensure either wq_worker_sleeping() sees the above
-	 * list_add_tail() or we see zero nr_running to avoid workers lying
+	 * list_add_tail() or we see zero nr_cm_workers to avoid workers lying
 	 * around lazily while there are works to be processed.
 	 */
 	smp_mb();
@@ -1544,14 +1544,14 @@ static void worker_enter_idle(struct worker *worker)
 		mod_timer(&pool->idle_timer, jiffies + IDLE_WORKER_TIMEOUT);
 
 	/*
-	 * Sanity check nr_running.  Because wq_unbind_fn() releases
+	 * Sanity check nr_cm_workers.  Because wq_unbind_fn() releases
 	 * pool->lock between setting %WORKER_UNBOUND and zapping
-	 * nr_running, the warning may trigger spuriously.  Check iff
+	 * nr_cm_workers, the warning may trigger spuriously.  Check iff
 	 * unbind is not in progress.
 	 */
 	WARN_ON_ONCE(!(pool->flags & POOL_DISASSOCIATED) &&
 		     pool->nr_workers == pool->nr_idle &&
-		     atomic_read(&pool->nr_running));
+		     atomic_read(&pool->nr_cm_workers));
 }
 
 /**
@@ -4404,14 +4404,14 @@ static void wq_unbind_fn(struct work_struct *work)
 		schedule();
 
 		/*
-		 * Sched callbacks are disabled now.  Zap nr_running.
-		 * After this, nr_running stays zero and need_more_worker()
+		 * Sched callbacks are disabled now.  Zap nr_cm_workers.
+		 * After this, nr_cm_workers stays zero and need_more_worker()
 		 * and keep_working() are always true as long as the
 		 * worklist is not empty.  This pool now behaves as an
 		 * unbound (in terms of concurrency management) pool which
 		 * are served by workers tied to the pool.
 		 */
-		atomic_set(&pool->nr_running, 0);
+		atomic_set(&pool->nr_cm_workers, 0);
 
 		/*
 		 * With concurrency management just turned off, a busy
@@ -4466,7 +4466,7 @@ static void rebind_workers(struct worker_pool *pool)
 
 		/*
 		 * We want to clear UNBOUND but can't directly call
-		 * worker_clr_flags() or adjust nr_running.  Atomically
+		 * worker_clr_flags() or adjust nr_cm_workers.  Atomically
 		 * replace UNBOUND with another flag REBOUND.
 		 * @worker will clear REBOUND using worker_clr_flags() when
 		 * it initiates the next execution cycle thus restoring
