@@ -20,6 +20,7 @@ struct worker_pool;
  * Only to be used in workqueue and async.
  */
 struct worker {
+	unsigned int		flags;		/* X: flags */
 	/* on idle list while idle, on busy hash table while busy */
 	union {
 		struct list_head	entry;	/* L: while idle */
@@ -30,12 +31,11 @@ struct worker {
 	work_func_t		current_func;	/* L: current_work's fn */
 	struct pool_workqueue	*current_pwq; /* L: current_work's pwq */
 	struct list_head	scheduled;	/* L: scheduled works */
-	struct task_struct	*task;		/* I: worker task */
 	struct worker_pool	*pool;		/* I: the associated pool */
 						/* L: for rescuers */
 	/* 64 bytes boundary on 64bit, 32 on 32bit */
+	struct task_struct	*task;		/* I: worker task */
 	unsigned long		last_active;	/* L: last active timestamp */
-	unsigned int		flags;		/* X: flags */
 	int			id;		/* I: worker id */
 
 	/* used only by rescuers to point to the target workqueue */
