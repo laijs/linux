@@ -143,6 +143,7 @@ struct worker_pool {
 	int			node;		/* I: the associated node ID */
 	int			id;		/* I: pool ID */
 	unsigned int		flags;		/* X: flags */
+	int			nr_cm_workers;	/* X: count for cm workers */
 
 	struct list_head	worklist;	/* L: list of pending works */
 	int			nr_workers;	/* L: total number of workers */
@@ -166,13 +167,6 @@ struct worker_pool {
 	struct workqueue_attrs	*attrs;		/* I: worker attributes */
 	struct hlist_node	hash_node;	/* PL: unbound_pool_hash node */
 	int			refcnt;		/* PL: refcnt for unbound pools */
-
-	/*
-	 * The nummber of current concurrency managed workers.
-	 * As it's likely to be accessed from other CPUs during
-	 * try_to_wake_up(), put it in a separate cacheline.
-	 */
-	atomic_t		nr_cm_workers ____cacheline_aligned_in_smp;
 
 	/*
 	 * Destruction of pool is sched-RCU protected to allow dereferences
@@ -693,7 +687,7 @@ static bool work_is_canceling(struct work_struct *work)
 
 static bool __need_more_worker(struct worker_pool *pool)
 {
-	return !atomic_read(&pool->nr_cm_workers);
+	return !pool->nr_cm_workers;
 }
 
 /*
@@ -718,8 +712,7 @@ static bool may_start_working(struct worker_pool *pool)
 /* Do I need to keep working?  Called from currently running workers. */
 static bool keep_working(struct worker_pool *pool)
 {
-	return !list_empty(&pool->worklist) &&
-		atomic_read(&pool->nr_cm_workers) <= 1;
+	return !list_empty(&pool->worklist) && pool->nr_cm_workers <= 1;
 }
 
 /* Do we need a new worker?  Called from manager. */
@@ -815,22 +808,22 @@ struct task_struct *wq_worker_sleeping(struct task_struct *task)
 	if (WARN_ON_ONCE(pool->cpu != raw_smp_processor_id()))
 		return NULL;
 
-	worker->flags = WORKER_QUIT_CM;
-
 	/*
-	 * The counterpart of the following dec_and_test, implied mb,
-	 * worklist not empty test sequence is in insert_work().
-	 * Please read comment there.
-	 *
 	 * @worker->flags == 0 is clear.  This means that we're bound to and
 	 * running on the local cpu w/ rq lock held and preemption
-	 * disabled, which in turn means that none else could be
-	 * manipulating idle_list, so dereferencing idle_list without pool
-	 * lock is safe.
+	 * disabled, which in turn means that we can access to
+	 * worker->flags, nr_cm_workers or idle_list.
 	 */
-	if (atomic_dec_and_test(&pool->nr_cm_workers) &&
-	    !list_empty(&pool->worklist))
-		to_wakeup = first_worker(pool);
+	worker->flags = WORKER_QUIT_CM;
+	if (--pool->nr_cm_workers == 0) {
+		/*
+		 * Paired the smp_mb() in insert_work().
+		 * Please read comment there.
+		 */
+		smp_mb();
+		if (!list_empty(&pool->worklist))
+			to_wakeup = first_worker(pool);
+	}
 	return to_wakeup ? to_wakeup->task : NULL;
 }
 
@@ -862,12 +855,11 @@ static inline void worker_set_flags(struct worker *worker, unsigned int flags,
 	 * if requested by @wakeup.
 	 */
 	if (!worker->flags) {
-		if (wakeup) {
-			if (atomic_dec_and_test(&pool->nr_cm_workers) &&
-			    !list_empty(&pool->worklist))
-				wake_up_worker(pool);
-		} else
-			atomic_dec(&pool->nr_cm_workers);
+		pool->nr_cm_workers--;
+		if (wakeup && !pool->nr_cm_workers &&
+		    !list_empty(&pool->worklist))
+			wake_up_worker(pool);
+		}
 	}
 
 	worker->flags |= flags;
@@ -891,7 +883,7 @@ static inline void worker_clr_flags(struct worker *worker, unsigned int flags)
 
 	worker->flags &= ~flags;
 	if (!worker->flags)
-		atomic_inc(&pool->nr_cm_workers);
+		pool->nr_cm_workers++;
 }
 
 /**
@@ -1537,7 +1529,7 @@ static void worker_enter_idle(struct worker *worker)
 	 */
 	WARN_ON_ONCE(!(pool->flags & POOL_DISASSOCIATED) &&
 		     pool->nr_workers == pool->nr_idle &&
-		     atomic_read(&pool->nr_cm_workers));
+		     pool->nr_cm_workers);
 }
 
 /**
@@ -4355,7 +4347,7 @@ static void wq_unbind_fn(struct work_struct *work)
 		 * unbound (in terms of concurrency management) pool which
 		 * are served by workers tied to the pool.
 		 */
-		atomic_set(&pool->nr_cm_workers, 0);
+		pool->nr_cm_workers = 0;
 
 		/*
 		 * With concurrency management just turned off, a busy
