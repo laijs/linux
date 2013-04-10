@@ -75,11 +75,13 @@ enum {
 	WORKER_DIE		= 1 << 1,	/* die die die */
 	WORKER_IDLE		= 1 << 2,	/* is idle */
 	WORKER_PREP		= 1 << 3,	/* preparing to run works */
+	WORKER_QUIT_CM		= 1 << 4,	/* quit concurrency managed */
 	WORKER_CPU_INTENSIVE	= 1 << 6,	/* cpu intensive */
 	WORKER_UNBOUND		= 1 << 7,	/* worker is unbound */
 	WORKER_REBOUND		= 1 << 8,	/* worker was rebound */
 
-	WORKER_NOT_RUNNING	= WORKER_PREP | WORKER_CPU_INTENSIVE |
+	WORKER_NOT_RUNNING	= WORKER_PREP | WORKER_QUIT_CM |
+				  WORKER_CPU_INTENSIVE |
 				  WORKER_UNBOUND | WORKER_REBOUND,
 
 	NR_STD_WORKER_POOLS	= 2,		/* # standard pools per cpu */
@@ -121,6 +123,10 @@ enum {
  *    be done only from local cpu.  Either disabling preemption on local
  *    cpu or grabbing pool->lock is enough for read access.  If
  *    POOL_DISASSOCIATED is set, it's identical to L.
+ *
+ * LI: If POOL_DISASSOCIATED is NOT set, read/modification access should be
+ *     done with local IRQ-disabled and only from local cpu.
+ *     If POOL_DISASSOCIATED is set, it's identical to L.
  *
  * MG: pool->manager_mutex and pool->lock protected.  Writes require both
  *     locks.  Reads can happen under either lock.
@@ -843,11 +849,13 @@ struct task_struct *wq_worker_sleeping(struct task_struct *task)
 	 * Please read comment there.
 	 *
 	 * NOT_RUNNING is clear.  This means that we're bound to and
-	 * running on the local cpu w/ rq lock held and preemption
+	 * running on the local cpu w/ rq lock held and preemption/irq
 	 * disabled, which in turn means that none else could be
 	 * manipulating idle_list, so dereferencing idle_list without pool
-	 * lock is safe.
+	 * lock is safe. And which in trun also means that we can
+	 * manipulating worker->flags.
 	 */
+	worker->flags |= WORKER_QUIT_CM;
 	if (atomic_dec_and_test(&pool->nr_running) &&
 	    !list_empty(&pool->worklist))
 		to_wakeup = first_worker(pool);
@@ -2160,9 +2168,9 @@ __acquires(&pool->lock)
 
 	spin_lock_irq(&pool->lock);
 
-	/* clear cpu intensive status if it is set */
-	if (worker->flags & WORKER_CPU_INTENSIVE)
-		worker_clr_flags(worker, WORKER_CPU_INTENSIVE);
+	/* clear cpu intensive status or WORKER_QUIT_CM if they are set */
+	if (worker->flags & (WORKER_CPU_INTENSIVE | WORKER_QUIT_CM))
+		worker_clr_flags(worker, WORKER_CPU_INTENSIVE | WORKER_QUIT_CM);
 
 	/* we're done with it, release */
 	hash_del(&worker->hentry);
