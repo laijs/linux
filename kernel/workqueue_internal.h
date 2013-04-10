@@ -35,7 +35,7 @@ struct worker {
 						/* L: for rescuers */
 	/* 64 bytes boundary on 64bit, 32 on 32bit */
 	unsigned long		last_active;	/* L: last active timestamp */
-	unsigned int		flags;		/* X: flags */
+	unsigned int		flags;		/* LI: flags */
 	int			id;		/* I: worker id */
 
 	/* used only by rescuers to point to the target workqueue */
