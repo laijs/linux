@@ -1764,12 +1764,12 @@ static void destroy_worker(struct worker *worker)
 
 	/* sanity check frenzy */
 	if (WARN_ON(worker->current_work) ||
-	    WARN_ON(!list_empty(&worker->scheduled)))
+	    WARN_ON(!list_empty(&worker->scheduled)) ||
+	    WARN_ON(!(worker->flags & WORKER_IDLE)))
 		return;
 
 	pool->nr_workers--;
-	if (worker->flags & WORKER_IDLE)
-		pool->nr_idle--;
+	pool->nr_idle--;
 
 	list_del_init(&worker->entry);
 	worker->flags |= WORKER_DIE;
