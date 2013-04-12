@@ -71,7 +71,6 @@ enum {
 	POOL_FREEZING		= 1 << 3,	/* freeze in progress */
 
 	/* worker flags */
-	WORKER_STARTED		= 1 << 0,	/* started */
 	WORKER_DIE		= 1 << 1,	/* die die die */
 	WORKER_IDLE		= 1 << 2,	/* is idle */
 	WORKER_PREP		= 1 << 3,	/* preparing to run works */
@@ -1713,7 +1712,6 @@ static struct worker *create_and_start_worker_locked(struct worker_pool *pool)
 	idr_replace(&pool->worker_idr, worker, worker->id);
 
 	/* start worker */
-	worker->flags |= WORKER_STARTED;
 	worker->pool->nr_workers++;
 	worker_enter_idle(worker);
 	wake_up_process(worker->task);
@@ -1769,8 +1767,7 @@ static void destroy_worker(struct worker *worker)
 	    WARN_ON(!list_empty(&worker->scheduled)))
 		return;
 
-	if (worker->flags & WORKER_STARTED)
-		pool->nr_workers--;
+	pool->nr_workers--;
 	if (worker->flags & WORKER_IDLE)
 		pool->nr_idle--;
 
