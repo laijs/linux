@@ -1862,9 +1862,6 @@ static void pool_mayday_timeout(unsigned long __pool)
  * sent to all rescuers with works scheduled on @pool to resolve
  * possible allocation deadlock.
  *
- * On return, need_to_create_worker() is guaranteed to be %false and
- * may_start_working() %true.
- *
  * LOCKING:
  * spin_lock_irq(pool->lock) which may be released and regrabbed
  * multiple times.  Does GFP_KERNEL allocations.  Called only from
@@ -1880,7 +1877,6 @@ __acquires(&pool->lock)
 {
 	if (!need_to_create_worker(pool))
 		return false;
-restart:
 	spin_unlock_irq(&pool->lock);
 
 	/* if we don't make progress in MAYDAY_INITIAL_TIMEOUT, call for help */
@@ -1902,8 +1898,6 @@ restart:
 
 	del_timer_sync(&pool->mayday_timer);
 	spin_lock_irq(&pool->lock);
-	if (need_to_create_worker(pool))
-		goto restart;
 	return true;
 }
 
@@ -1953,9 +1947,7 @@ static bool maybe_destroy_workers(struct worker_pool *pool)
  * to.  At any given time, there can be only zero or one manager per
  * pool.  The exclusion is handled automatically by this function.
  *
- * The caller can safely start processing works on false return.  On
- * true return, it's guaranteed that need_to_create_worker() is false
- * and may_start_working() is true.
+ * The caller can safely start processing works on false return.
  *
  * CONTEXT:
  * spin_lock_irq(pool->lock) which may be released and regrabbed
@@ -2006,10 +1998,6 @@ static bool manage_workers(struct worker *worker)
 
 	pool->flags &= ~POOL_MANAGE_WORKERS;
 
-	/*
-	 * Destroy and then create so that may_start_working() is true
-	 * on return.
-	 */
 	ret |= maybe_destroy_workers(pool);
 	ret |= maybe_create_worker(pool);
 
