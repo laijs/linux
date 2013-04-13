@@ -1329,7 +1329,6 @@ retry:
 	if (unlikely(!pwq->refcnt)) {
 		if (wq->flags & WQ_UNBOUND) {
 			spin_unlock(&pwq->pool->lock);
-			cpu_relax();
 			goto retry;
 		}
 		/* oops */
