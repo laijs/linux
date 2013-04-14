@@ -30,7 +30,7 @@
 struct idr_layer {
 	int			prefix;	/* the ID prefix of this idr_layer */
 	DECLARE_BITMAP(bitmap, IDR_SIZE); /* A zero bit means "space here" */
-	struct idr_layer __rcu	*ary[1<<IDR_BITS];
+	struct idr_layer __rcu	*ary[IDR_SIZE];
 	int			count;	/* When zero, we can release it */
 	int			layer;	/* distance from leaf */
 	struct rcu_head		rcu_head;
