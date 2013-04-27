@@ -24,7 +24,6 @@
 #include <linux/slab.h>
 #include <linux/stddef.h>
 #include <linux/export.h>
-#include <linux/reciprocal_div.h>
 
 struct flex_array_part {
 	char elements[FLEX_ARRAY_PART_SIZE];
