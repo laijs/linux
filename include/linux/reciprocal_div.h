@@ -10,7 +10,7 @@
  * and B is a known value (but not known at compile time)
  *
  * The math principle used is :
- *   Let RECIPROCAL_VALUE(B) be (((1LL << 32) + (B - 1))/ B)
+ *   Let RECIPROCAL_VALUE(B) be (((1LL << 32) + (B - 1)) / B)
  *   Then A / B = (u32)(((u64)(A) * (R)) >> 32)
  *
  * This replaces a divide by a multiply (and a shift), and
@@ -22,6 +22,7 @@
  * Should not be called before each reciprocal_divide(),
  * or else the performance is slower than a normal divide.
  */
+#define RECIPROCAL_VALUE(B) ((u32)(((1LL << 32) + ((u32)(B) - 1)) / (u32)(B)))
 extern u32 reciprocal_value(u32 B);
 
 
