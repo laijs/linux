@@ -85,8 +85,8 @@ static inline int elements_fit_in_base(struct flex_array *fa)
  * capacity in the base structure.  Also note that no effort is made
  * to efficiently pack objects across page boundaries.
  */
-struct flex_array *flex_array_alloc(int element_size, unsigned int total,
-					gfp_t flags)
+struct flex_array *flex_array_alloc(unsigned int element_size,
+				    unsigned int total, gfp_t flags)
 {
 	struct flex_array *ret;
 	int elems_per_part = 0;
