@@ -265,26 +265,17 @@ int flex_array_prealloc(struct flex_array *fa, unsigned int start,
 	int start_part;
 	int end_part;
 	int part_nr;
-	unsigned int end;
 	struct flex_array_part *part;
 
-	if (!start && !nr_elements)
-		return 0;
 	if (start >= fa->total_nr_elements)
 		return -ENOSPC;
-	if (!nr_elements)
-		return 0;
-
-	end = start + nr_elements - 1;
-
-	if (end >= fa->total_nr_elements)
+	if ((fa->total_nr_elements - start) < nr_elements)
 		return -ENOSPC;
-	if (!fa->element_size)
+	if (!nr_elements || !fa->element_size || elements_fit_in_base(fa))
 		return 0;
-	if (elements_fit_in_base(fa))
-		return 0;
+
 	start_part = fa_element_to_part_nr(fa, start);
-	end_part = fa_element_to_part_nr(fa, end);
+	end_part = fa_element_to_part_nr(fa, start + nr_elements - 1);
 	for (part_nr = start_part; part_nr <= end_part; part_nr++) {
 		part = __fa_get_part(fa, part_nr, flags);
 		if (!part)
