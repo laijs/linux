@@ -66,6 +66,8 @@ struct flex_array {
 
 struct flex_array *flex_array_alloc(unsigned int element_size,
 		unsigned int total, gfp_t flags);
+struct flex_array *flex_array_alloc_whole(unsigned int element_size,
+		unsigned int total, gfp_t flags);
 int flex_array_prealloc(struct flex_array *fa, unsigned int start,
 		unsigned int nr_elements, gfp_t flags);
 void flex_array_free(struct flex_array *fa);

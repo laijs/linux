@@ -115,6 +115,30 @@ struct flex_array *flex_array_alloc(unsigned int element_size,
 }
 EXPORT_SYMBOL(flex_array_alloc);
 
+/**
+ * flex_array_alloc_whole - allocate a new flexible array and the whole memory
+ * @element_size:	the size of individual elements in the array
+ * @total:		total number of elements that this should hold
+ * @flags:		page allocation flags to use for base array
+ *
+ * See also flex_array_alloc()
+ */
+struct flex_array *flex_array_alloc_whole(unsigned int element_size,
+					  unsigned int total, gfp_t flags)
+{
+	struct flex_array *ret;
+
+	ret = flex_array_alloc(element_size, total, flags);
+	if (ret) {
+		if (!flex_array_prealloc(ret, 0, total, flags))
+			return ret;
+		flex_array_free(ret);
+	}
+
+	return NULL;
+}
+EXPORT_SYMBOL(flex_array_alloc_whole);
+
 static int fa_element_to_part_nr(struct flex_array *fa,
 					unsigned int element_nr)
 {
