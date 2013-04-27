@@ -19,9 +19,9 @@ struct flex_array_part;
 struct flex_array {
 	union {
 		struct {
-			int element_size;
-			int total_nr_elements;
-			int elems_per_part;
+			unsigned int element_size;
+			unsigned int total_nr_elements;
+			unsigned int elems_per_part;
 			u32 reciprocal_elems;
 			struct flex_array_part *parts[];
 		};
@@ -60,8 +60,8 @@ struct flex_array {
 			FLEX_ARRAY_ELEMENTS_PER_PART(__element_size));	\
 	}
 
-struct flex_array *flex_array_alloc(int element_size, unsigned int total,
-		gfp_t flags);
+struct flex_array *flex_array_alloc(unsigned int element_size,
+		unsigned int total, gfp_t flags);
 int flex_array_prealloc(struct flex_array *fa, unsigned int start,
 		unsigned int nr_elements, gfp_t flags);
 void flex_array_free(struct flex_array *fa);
