@@ -1802,8 +1802,8 @@ out:
 
 struct map_files_info {
 	fmode_t		mode;
-	unsigned long	len;
-	unsigned char	name[4*sizeof(long)+2]; /* max: %lx-%lx\0 */
+	unsigned long	vm_start;
+	unsigned long	vm_end;
 };
 
 static struct dentry *
@@ -1975,9 +1975,8 @@ proc_map_files_readdir(struct file *filp, void *dirent, filldir_t filldir)
 					continue;
 
 				info.mode = vma->vm_file->f_mode;
-				info.len = snprintf(info.name,
-						sizeof(info.name), "%lx-%lx",
-						vma->vm_start, vma->vm_end);
+				info.vm_start = vma->vm_start;
+				info.vm_end = vma->vm_end;
 				if (flex_array_put(fa, i++, &info, GFP_KERNEL))
 					BUG();
 			}
@@ -1985,9 +1984,14 @@ proc_map_files_readdir(struct file *filp, void *dirent, filldir_t filldir)
 		up_read(&mm->mmap_sem);
 
 		for (i = 0; i < nr_files; i++) {
+			int len;
+			char name[4*sizeof(long)+2]; /* max: %lx-%lx\0 */
+
 			p = flex_array_get(fa, i);
+			len = snprintf(name, sizeof(name), "%lx-%lx",
+				       p->vm_start, p->vm_end);
 			ret = proc_fill_cache(filp, dirent, filldir,
-					      p->name, p->len,
+					      name, len,
 					      proc_map_files_instantiate,
 					      task,
 					      (void *)(unsigned long)p->mode);
