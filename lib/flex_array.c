@@ -121,6 +121,11 @@ static int fa_element_to_part_nr(struct flex_array *fa,
 	return reciprocal_divide(element_nr, fa->reciprocal_elems);
 }
 
+static int fa_max_part_nr(struct flex_array *fa)
+{
+	return fa_element_to_part_nr(fa, fa->total_nr_elements - 1);
+}
+
 /**
  * flex_array_free_parts - just free the second-level pages
  * @fa:		the flex array from which to free parts
@@ -134,7 +139,7 @@ void flex_array_free_parts(struct flex_array *fa)
 
 	if (elements_fit_in_base(fa))
 		return;
-	for (part_nr = 0; part_nr < FLEX_ARRAY_NR_BASE_PTRS; part_nr++)
+	for (part_nr = 0; part_nr <= fa_max_part_nr(fa); part_nr++)
 		kfree(fa->parts[part_nr]);
 }
 EXPORT_SYMBOL(flex_array_free_parts);
@@ -368,7 +373,7 @@ int flex_array_shrink(struct flex_array *fa)
 		return 0;
 	if (elements_fit_in_base(fa))
 		return ret;
-	for (part_nr = 0; part_nr < FLEX_ARRAY_NR_BASE_PTRS; part_nr++) {
+	for (part_nr = 0; part_nr <= fa_max_part_nr(fa); part_nr++) {
 		part = fa->parts[part_nr];
 		if (!part)
 			continue;
