@@ -2060,14 +2060,14 @@ static int cgroup_attach_proc(struct cgroup *cgrp, struct task_struct *leader)
 	 * threads exit, this will just be an over-estimate.
 	 */
 	group_size = get_nr_threads(leader);
-	/* flex_array supports very large thread-groups better than kmalloc. */
-	group = flex_array_alloc(sizeof(*tc), group_size, GFP_KERNEL);
+	/*
+	 * flex_array supports very large thread-groups better than kmalloc().
+	 * Alloc the whole memroy of flex_array to guarantee space
+	 * while iterating in rcu read-side.
+	 */
+	group = flex_array_alloc_whole(sizeof(*tc), group_size, GFP_KERNEL);
 	if (!group)
 		return -ENOMEM;
-	/* pre-allocate to guarantee space while iterating in rcu read-side. */
-	retval = flex_array_prealloc(group, 0, group_size, GFP_KERNEL);
-	if (retval)
-		goto out_free_group_list;
 
 	tsk = leader;
 	i = 0;
