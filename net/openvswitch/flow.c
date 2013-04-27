@@ -239,18 +239,12 @@ static struct hlist_head *find_bucket(struct flow_table *table, u32 hash)
 static struct flex_array *alloc_buckets(unsigned int n_buckets)
 {
 	struct flex_array *buckets;
-	int i, err;
+	int i;
 
-	buckets = flex_array_alloc(sizeof(struct hlist_head *),
-				   n_buckets, GFP_KERNEL);
+	buckets = flex_array_alloc_whole(sizeof(struct hlist_head *),
+					 n_buckets, GFP_KERNEL);
 	if (!buckets)
 		return NULL;
-
-	err = flex_array_prealloc(buckets, 0, n_buckets, GFP_KERNEL);
-	if (err) {
-		flex_array_free(buckets);
-		return NULL;
-	}
 
 	for (i = 0; i < n_buckets; i++)
 		INIT_HLIST_HEAD((struct hlist_head *)
