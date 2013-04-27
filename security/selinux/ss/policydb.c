@@ -548,15 +548,10 @@ static int policydb_index(struct policydb *p)
 
 	/* Yes, I want the sizeof the pointer, not the structure */
 	rc = -ENOMEM;
-	p->type_val_to_struct_array = flex_array_alloc(sizeof(struct type_datum *),
-						       p->p_types.nprim,
-						       GFP_KERNEL | __GFP_ZERO);
+	p->type_val_to_struct_array = flex_array_alloc_whole(
+			sizeof(struct type_datum *), p->p_types.nprim,
+			GFP_KERNEL | __GFP_ZERO);
 	if (!p->type_val_to_struct_array)
-		goto out;
-
-	rc = flex_array_prealloc(p->type_val_to_struct_array, 0,
-				 p->p_types.nprim, GFP_KERNEL | __GFP_ZERO);
-	if (rc)
 		goto out;
 
 	rc = cond_init_bool_indexes(p);
@@ -565,16 +560,9 @@ static int policydb_index(struct policydb *p)
 
 	for (i = 0; i < SYM_NUM; i++) {
 		rc = -ENOMEM;
-		p->sym_val_to_name[i] = flex_array_alloc(sizeof(char *),
-							 p->symtab[i].nprim,
-							 GFP_KERNEL | __GFP_ZERO);
+		p->sym_val_to_name[i] = flex_array_alloc_whole(sizeof(char *),
+				p->symtab[i].nprim, GFP_KERNEL | __GFP_ZERO);
 		if (!p->sym_val_to_name[i])
-			goto out;
-
-		rc = flex_array_prealloc(p->sym_val_to_name[i],
-					 0, p->symtab[i].nprim,
-					 GFP_KERNEL | __GFP_ZERO);
-		if (rc)
 			goto out;
 
 		rc = hashtab_map(p->symtab[i].table, index_f[i], p);
@@ -2457,16 +2445,10 @@ int policydb_read(struct policydb *p, void *fp)
 		goto bad;
 
 	rc = -ENOMEM;
-	p->type_attr_map_array = flex_array_alloc(sizeof(struct ebitmap),
-						  p->p_types.nprim,
-						  GFP_KERNEL | __GFP_ZERO);
+	/* alloc whole so we don't have to worry about the put ever failing */
+	p->type_attr_map_array = flex_array_alloc_whole(sizeof(struct ebitmap),
+			p->p_types.nprim, GFP_KERNEL | __GFP_ZERO);
 	if (!p->type_attr_map_array)
-		goto bad;
-
-	/* preallocate so we don't have to worry about the put ever failing */
-	rc = flex_array_prealloc(p->type_attr_map_array, 0, p->p_types.nprim,
-				 GFP_KERNEL | __GFP_ZERO);
-	if (rc)
 		goto bad;
 
 	for (i = 0; i < p->p_types.nprim; i++) {
