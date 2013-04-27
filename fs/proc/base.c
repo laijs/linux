@@ -1956,13 +1956,10 @@ proc_map_files_readdir(struct file *filp, void *dirent, filldir_t filldir)
 		}
 
 		if (nr_files) {
-			fa = flex_array_alloc(sizeof(info), nr_files,
+			fa = flex_array_alloc_whole(sizeof(info), nr_files,
 						GFP_KERNEL);
-			if (!fa || flex_array_prealloc(fa, 0, nr_files,
-							GFP_KERNEL)) {
+			if (!fa) {
 				ret = -ENOMEM;
-				if (fa)
-					flex_array_free(fa);
 				up_read(&mm->mmap_sem);
 				mmput(mm);
 				goto out_put_task;
