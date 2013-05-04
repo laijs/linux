@@ -185,11 +185,13 @@ static unsigned int index_inside_part(struct flex_array *fa,
 	return part_offset * fa->element_size;
 }
 
+#define NO_ALLOC_PART ((__force gfp_t)~0UL)
+
 static struct flex_array_part *
 __fa_get_part(struct flex_array *fa, int part_nr, gfp_t flags)
 {
 	struct flex_array_part *part = fa->parts[part_nr];
-	if (!part) {
+	if (!part && (flags != NO_ALLOC_PART)) {
 		part = kmalloc(sizeof(struct flex_array_part), flags);
 		if (!part)
 			return NULL;
@@ -199,6 +201,29 @@ __fa_get_part(struct flex_array *fa, int part_nr, gfp_t flags)
 		fa->parts[part_nr] = part;
 	}
 	return part;
+}
+
+static
+int flex_array_element_ptr(struct flex_array *fa, unsigned int element_nr,
+			   gfp_t flags, void **eptr)
+{
+	int part_nr = 0;
+	struct flex_array_part *part;
+
+	if (element_nr >= fa->total_nr_elements)
+		return -ENOSPC;
+	if (!fa->element_size)
+		return 0;
+	if (elements_fit_in_base(fa))
+		part = (struct flex_array_part *)&fa->parts[0];
+	else {
+		part_nr = fa_element_to_part_nr(fa, element_nr);
+		part = __fa_get_part(fa, part_nr, flags);
+		if (!part)
+			return -ENOMEM;
+	}
+	*eptr = &part->elements[index_inside_part(fa, element_nr, part_nr)];
+	return 0;
 }
 
 /**
@@ -221,25 +246,13 @@ __fa_get_part(struct flex_array *fa, int part_nr, gfp_t flags)
 int flex_array_put(struct flex_array *fa, unsigned int element_nr, void *src,
 			gfp_t flags)
 {
-	int part_nr = 0;
-	struct flex_array_part *part;
-	void *dst;
+	int rc;
+	void *dst = NULL;
 
-	if (element_nr >= fa->total_nr_elements)
-		return -ENOSPC;
-	if (!fa->element_size)
-		return 0;
-	if (elements_fit_in_base(fa))
-		part = (struct flex_array_part *)&fa->parts[0];
-	else {
-		part_nr = fa_element_to_part_nr(fa, element_nr);
-		part = __fa_get_part(fa, part_nr, flags);
-		if (!part)
-			return -ENOMEM;
-	}
-	dst = &part->elements[index_inside_part(fa, element_nr, part_nr)];
-	memcpy(dst, src, fa->element_size);
-	return 0;
+	rc = flex_array_element_ptr(fa, element_nr, flags, &dst);
+	if (dst)
+		memcpy(dst, src, fa->element_size);
+	return rc;
 }
 EXPORT_SYMBOL(flex_array_put);
 
@@ -252,25 +265,13 @@ EXPORT_SYMBOL(flex_array_put);
  */
 int flex_array_clear(struct flex_array *fa, unsigned int element_nr)
 {
-	int part_nr = 0;
-	struct flex_array_part *part;
-	void *dst;
+	int rc;
+	void *dst = NULL;
 
-	if (element_nr >= fa->total_nr_elements)
-		return -ENOSPC;
-	if (!fa->element_size)
-		return 0;
-	if (elements_fit_in_base(fa))
-		part = (struct flex_array_part *)&fa->parts[0];
-	else {
-		part_nr = fa_element_to_part_nr(fa, element_nr);
-		part = fa->parts[part_nr];
-		if (!part)
-			return -EINVAL;
-	}
-	dst = &part->elements[index_inside_part(fa, element_nr, part_nr)];
-	memset(dst, FLEX_ARRAY_FREE, fa->element_size);
-	return 0;
+	rc = flex_array_element_ptr(fa, element_nr, NO_ALLOC_PART, &dst);
+	if (dst)
+		memset(dst, FLEX_ARRAY_FREE, fa->element_size);
+	return rc;
 }
 EXPORT_SYMBOL(flex_array_clear);
 
@@ -328,22 +329,10 @@ EXPORT_SYMBOL(flex_array_prealloc);
  */
 void *flex_array_get(struct flex_array *fa, unsigned int element_nr)
 {
-	int part_nr = 0;
-	struct flex_array_part *part;
+	void *dst = NULL;
 
-	if (!fa->element_size)
-		return NULL;
-	if (element_nr >= fa->total_nr_elements)
-		return NULL;
-	if (elements_fit_in_base(fa))
-		part = (struct flex_array_part *)&fa->parts[0];
-	else {
-		part_nr = fa_element_to_part_nr(fa, element_nr);
-		part = fa->parts[part_nr];
-		if (!part)
-			return NULL;
-	}
-	return &part->elements[index_inside_part(fa, element_nr, part_nr)];
+	flex_array_element_ptr(fa, element_nr, NO_ALLOC_PART, &dst);
+	return dst;
 }
 EXPORT_SYMBOL(flex_array_get);
 
