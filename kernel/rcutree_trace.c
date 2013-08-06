@@ -149,6 +149,7 @@ static void print_one_rcu_data(struct seq_file *m, struct rcu_data *rdp)
 	seq_printf(m, " ci=%lu nci=%lu co=%lu ca=%lu\n",
 		   rdp->n_cbs_invoked, rdp->n_nocbs_invoked,
 		   rdp->n_cbs_orphaned, rdp->n_cbs_adopted);
+	seq_printf(m, " ds=%lu\n", rdp->n_defer_special);
 }
 
 static int show_rcudata(struct seq_file *m, void *v)
