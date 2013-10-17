@@ -16,7 +16,7 @@
  * Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA 02111-1307, USA.
  *
  * Copyright (C) IBM Corporation, 2006
- * Copyright (C) Fujitsu, 2012
+ * Copyright (C) Fujitsu, 2012-2013
  *
  * Author: Paul McKenney <paulmck@us.ibm.com>
  *	   Lai Jiangshan <laijs@cn.fujitsu.com>
@@ -27,13 +27,7 @@
  */
 
 #include <linux/export.h>
-#include <linux/mutex.h>
-#include <linux/percpu.h>
-#include <linux/preempt.h>
-#include <linux/rcupdate.h>
 #include <linux/sched.h>
-#include <linux/smp.h>
-#include <linux/delay.h>
 #include <linux/srcu.h>
 
 #include <trace/events/rcu.h>
@@ -64,6 +58,14 @@ static inline void rcu_batch_queue(struct rcu_batch *b, struct rcu_head *head)
 static inline bool rcu_batch_empty(struct rcu_batch *b)
 {
 	return b->tail == &b->head;
+}
+
+/*
+ * Tests whether the specified rcu_batch structure has just one entry.
+ */
+static inline bool rcu_batch_is_singular(struct rcu_batch *b)
+{
+	return container_of(b->tail, struct rcu_head, next) == b->head;
 }
 
 /*
@@ -101,13 +103,12 @@ static inline void rcu_batch_move(struct rcu_batch *to, struct rcu_batch *from)
 static int init_srcu_struct_fields(struct srcu_struct *sp)
 {
 	sp->completed = 0;
-	spin_lock_init(&sp->queue_lock);
-	sp->running = false;
+	atomic_set(&sp->gp_ref, 0);
+	spin_lock_init(&sp->lock);
 	rcu_batch_init(&sp->batch_queue);
-	rcu_batch_init(&sp->batch_check0);
-	rcu_batch_init(&sp->batch_check1);
+	rcu_batch_init(&sp->batch_wait_gp);
 	rcu_batch_init(&sp->batch_done);
-	INIT_DELAYED_WORK(&sp->work, process_srcu);
+	INIT_WORK(&sp->work, process_srcu);
 	sp->per_cpu_ref = alloc_percpu(struct srcu_struct_array);
 	return sp->per_cpu_ref ? 0 : -ENOMEM;
 }
@@ -141,117 +142,6 @@ int init_srcu_struct(struct srcu_struct *sp)
 EXPORT_SYMBOL_GPL(init_srcu_struct);
 
 #endif /* #else #ifdef CONFIG_DEBUG_LOCK_ALLOC */
-
-/*
- * Returns approximate total of the readers' ->seq[] values for the
- * rank of per-CPU counters specified by idx.
- */
-static unsigned long srcu_readers_seq_idx(struct srcu_struct *sp, int idx)
-{
-	int cpu;
-	unsigned long sum = 0;
-	unsigned long t;
-
-	for_each_possible_cpu(cpu) {
-		t = ACCESS_ONCE(per_cpu_ptr(sp->per_cpu_ref, cpu)->seq[idx]);
-		sum += t;
-	}
-	return sum;
-}
-
-/*
- * Returns approximate number of readers active on the specified rank
- * of the per-CPU ->c[] counters.
- */
-static unsigned long srcu_readers_active_idx(struct srcu_struct *sp, int idx)
-{
-	int cpu;
-	unsigned long sum = 0;
-	unsigned long t;
-
-	for_each_possible_cpu(cpu) {
-		t = ACCESS_ONCE(per_cpu_ptr(sp->per_cpu_ref, cpu)->c[idx]);
-		sum += t;
-	}
-	return sum;
-}
-
-/*
- * Return true if the number of pre-existing readers is determined to
- * be stably zero.  An example unstable zero can occur if the call
- * to srcu_readers_active_idx() misses an __srcu_read_lock() increment,
- * but due to task migration, sees the corresponding __srcu_read_unlock()
- * decrement.  This can happen because srcu_readers_active_idx() takes
- * time to sum the array, and might in fact be interrupted or preempted
- * partway through the summation.
- */
-static bool srcu_readers_active_idx_check(struct srcu_struct *sp, int idx)
-{
-	unsigned long seq;
-
-	seq = srcu_readers_seq_idx(sp, idx);
-
-	/*
-	 * The following smp_mb() A pairs with the smp_mb() B located in
-	 * __srcu_read_lock().  This pairing ensures that if an
-	 * __srcu_read_lock() increments its counter after the summation
-	 * in srcu_readers_active_idx(), then the corresponding SRCU read-side
-	 * critical section will see any changes made prior to the start
-	 * of the current SRCU grace period.
-	 *
-	 * Also, if the above call to srcu_readers_seq_idx() saw the
-	 * increment of ->seq[], then the call to srcu_readers_active_idx()
-	 * must see the increment of ->c[].
-	 */
-	smp_mb(); /* A */
-
-	/*
-	 * Note that srcu_readers_active_idx() can incorrectly return
-	 * zero even though there is a pre-existing reader throughout.
-	 * To see this, suppose that task A is in a very long SRCU
-	 * read-side critical section that started on CPU 0, and that
-	 * no other reader exists, so that the sum of the counters
-	 * is equal to one.  Then suppose that task B starts executing
-	 * srcu_readers_active_idx(), summing up to CPU 1, and then that
-	 * task C starts reading on CPU 0, so that its increment is not
-	 * summed, but finishes reading on CPU 2, so that its decrement
-	 * -is- summed.  Then when task B completes its sum, it will
-	 * incorrectly get zero, despite the fact that task A has been
-	 * in its SRCU read-side critical section the whole time.
-	 *
-	 * We therefore do a validation step should srcu_readers_active_idx()
-	 * return zero.
-	 */
-	if (srcu_readers_active_idx(sp, idx) != 0)
-		return false;
-
-	/*
-	 * The remainder of this function is the validation step.
-	 * The following smp_mb() D pairs with the smp_mb() C in
-	 * __srcu_read_unlock().  If the __srcu_read_unlock() was seen
-	 * by srcu_readers_active_idx() above, then any destructive
-	 * operation performed after the grace period will happen after
-	 * the corresponding SRCU read-side critical section.
-	 *
-	 * Note that there can be at most NR_CPUS worth of readers using
-	 * the old index, which is not enough to overflow even a 32-bit
-	 * integer.  (Yes, this does mean that systems having more than
-	 * a billion or so CPUs need to be 64-bit systems.)  Therefore,
-	 * the sum of the ->seq[] counters cannot possibly overflow.
-	 * Therefore, the only way that the return values of the two
-	 * calls to srcu_readers_seq_idx() can be equal is if there were
-	 * no increments of the corresponding rank of ->seq[] counts
-	 * in the interim.  But the missed-increment scenario laid out
-	 * above includes an increment of the ->seq[] counter by
-	 * the corresponding __srcu_read_lock().  Therefore, if this
-	 * scenario occurs, the return values from the two calls to
-	 * srcu_readers_seq_idx() will differ, and thus the validation
-	 * step below suffices.
-	 */
-	smp_mb(); /* D */
-
-	return srcu_readers_seq_idx(sp, idx) == seq;
-}
 
 /**
  * srcu_readers_active - returns approximate number of readers.
@@ -289,95 +179,165 @@ void cleanup_srcu_struct(struct srcu_struct *sp)
 }
 EXPORT_SYMBOL_GPL(cleanup_srcu_struct);
 
-/*
- * Counts the new reader in the appropriate per-CPU element of the
- * srcu_struct.  Must be called from process context.
- * Returns an index that must be passed to the matching srcu_read_unlock().
- */
-int __srcu_read_lock(struct srcu_struct *sp)
-{
-	int idx;
+static void srcu_gp_accumref(struct rcu_head *rcu);
+static void srcu_gp_finish(struct srcu_struct *sp);
+static void wakeme_after_rcu(struct rcu_head *head);
 
-	idx = ACCESS_ONCE(sp->completed) & 0x1;
-	preempt_disable();
-	ACCESS_ONCE(this_cpu_ptr(sp->per_cpu_ref)->c[idx]) += 1;
-	smp_mb(); /* B */  /* Avoid leaking the critical section. */
-	ACCESS_ONCE(this_cpu_ptr(sp->per_cpu_ref)->seq[idx]) += 1;
-	preempt_enable();
-	return idx;
+/*
+ * The ->gp_ref is zero when the GP is initialized, but it is only
+ * decreased except srcu_gp_accumref(), so if the ->gp_ref returns
+ * to zero again after srcu_gp_accumref(), the GP is finished.
+ */
+void __srcu_read_unlock_special(struct srcu_struct *sp)
+{
+	if (atomic_dec_return(&sp->gp_ref) == 0)
+		srcu_gp_finish(sp);
 }
-EXPORT_SYMBOL_GPL(__srcu_read_lock);
+EXPORT_SYMBOL_GPL(__srcu_read_unlock_special);
 
 /*
- * Removes the count for the old reader from the appropriate per-CPU
- * element of the srcu_struct.  Note that this may well be a different
- * CPU than that which was incremented by the corresponding srcu_read_lock().
- * Must be called from process context.
+ * Before srcu_gp_new(), all ongoing srcu-readers' idx SHOULD equal to
+ * sp->completed & 0x1.
  */
-void __srcu_read_unlock(struct srcu_struct *sp, int idx)
+static void srcu_gp_new(struct srcu_struct *sp, bool start)
 {
-	smp_mb(); /* C */  /* Avoid leaking the critical section. */
-	this_cpu_dec(sp->per_cpu_ref->c[idx]);
+	rcu_batch_move(&sp->batch_wait_gp, &sp->batch_queue);
+	sp->completed++;
+	if (start)
+		call_rcu_sched(&sp->rcu, srcu_gp_accumref);
 }
-EXPORT_SYMBOL_GPL(__srcu_read_unlock);
 
 /*
- * We use an adaptive strategy for synchronize_srcu() and especially for
- * synchronize_srcu_expedited().  We spin for a fixed time period
- * (defined below) to allow SRCU readers to exit their read-side critical
- * sections.  If there are still some readers after 10 microseconds,
- * we repeatedly block for 1-millisecond time periods.  This approach
- * has done well in testing, so there is no need for a config parameter.
+ * Read sites' accesses to @sp are protected by rcu_read_lock_sched(),
+ * and srcu_gp_accumref() is called after a rcu-sched-GP which is started
+ * when starting this srcu-GP.
+ *
+ * With the help from this rcu-sched-GP, all srcu-readers will see
+ * new sp->completed only, and ->c[old_idx] can't be changed any more
+ * and srcu_gp_accumref() sees all updated ->c[old_idx] for accumulating
+ * reference.
+ *
+ * And with the help from the rcu-sched-GP, all references of all
+ * old srcu-readers(which idx==old_idx) are accumulated, so there is
+ * no old srcu-reader(which idx==old_idx) left after this srcu-GP,
+ * which matches the srcu_gp_new()'s requirement for next srcu-GP.
+ *
+ * Memory barrier/order:
+ * Kind 1:
+ *        CPU1                  CPU2
+ *                      srcu-readers(fast path)
+ * ------------------------------------------------
+ *                              rcu-sched-GP ensures this order
+ * ------------------------------------------------
+ * code after srcu-GP
+ *
+ * Kind 2:
+ *        CPU1                  CPU2
+ *                      srcu-readers(slow path)
+ *                        __srcu_read_unlock_special()
+ * ------------------------------------------------
+ *                              atomic operations ensure this order
+ * ------------------------------------------------
+ * code after srcu-GP
  */
-#define SRCU_RETRY_CHECK_DELAY		5
-#define SYNCHRONIZE_SRCU_TRYCOUNT	2
-#define SYNCHRONIZE_SRCU_EXP_TRYCOUNT	12
-
-/*
- * @@@ Wait until all pre-existing readers complete.  Such readers
- * will have used the index specified by "idx".
- * the caller should ensures the ->completed is not changed while checking
- * and idx = (->completed & 1) ^ 1
- */
-static bool try_check_zero(struct srcu_struct *sp, int idx, int trycount)
+static void srcu_gp_accumref(struct rcu_head *rcu)
 {
+	struct srcu_struct *sp = container_of(rcu, struct srcu_struct, rcu);
+	int old_idx = (sp->completed & 0x1) ^ 0x1;
+	int cpu;
+	int count = 0;
+
+	for_each_possible_cpu(cpu) {
+		count += per_cpu_ptr(sp->per_cpu_ref, cpu)->c[old_idx];
+		per_cpu_ptr(sp->per_cpu_ref, cpu)->c[old_idx] = 0;
+	}
+
+	if (atomic_add_return(count, &sp->gp_ref) == 0)
+		srcu_gp_finish(sp);
+}
+
+/*
+ * The GP is finish, schedule a kworker to process the callbacks,
+ * (or directly invoke the callback if it is the only synchronize_srcu()
+ * callback)
+ *
+ * And start a new GP when there is/are callback(s) pending.
+ */
+static void srcu_gp_finish(struct srcu_struct *sp)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&sp->lock, flags);
+	if (likely(rcu_batch_is_singular(&sp->batch_wait_gp) &&
+		   sp->batch_wait_gp.head->func == wakeme_after_rcu)) {
+		wakeme_after_rcu(rcu_batch_dequeue(&sp->batch_wait_gp));
+	} else {
+		rcu_batch_move(&sp->batch_done, &sp->batch_wait_gp);
+		schedule_work(&sp->work);
+	}
+
+	if (!rcu_batch_empty(&sp->batch_queue))
+		srcu_gp_new(sp, true);
+	spin_unlock_irqrestore(&sp->lock, flags);
+}
+
+/*
+ * Process srcu callbacks from kworker.
+ */
+void process_srcu(struct work_struct *work)
+{
+	struct srcu_struct *sp;
+	struct rcu_batch callbacks;
+	struct rcu_head *head;
+
+	sp = container_of(work, struct srcu_struct, work);
+	rcu_batch_init(&callbacks);
+
+	spin_lock_irq(&sp->lock);
+	rcu_batch_move(&callbacks, &sp->batch_done);
+	spin_unlock_irq(&sp->lock);
+
 	for (;;) {
-		if (srcu_readers_active_idx_check(sp, idx))
-			return true;
-		if (--trycount <= 0)
-			return false;
-		udelay(SRCU_RETRY_CHECK_DELAY);
+		head = rcu_batch_dequeue(&callbacks);
+		if (!head)
+			break;
+		local_bh_disable();
+		head->func(head);
+		local_bh_enable();
 	}
 }
+EXPORT_SYMBOL_GPL(process_srcu);
 
 /*
- * Increment the ->completed counter so that future SRCU readers will
- * use the other rank of the ->c[] and ->seq[] arrays.  This allows
- * us to wait for pre-existing readers in a starvation-free manner.
+ * Return true iff it starts a new GP or there is a existed GP running.
+ * The caller should start the just created GP when return false.
  */
-static void srcu_flip(struct srcu_struct *sp)
-{
-	sp->completed++;
-}
-
-/*
- * Enqueue an SRCU callback on the specified srcu_struct structure,
- * initiating grace-period processing if it is not already running.
- */
-void call_srcu(struct srcu_struct *sp, struct rcu_head *head,
-		void (*func)(struct rcu_head *head))
+static bool __call_srcu(struct srcu_struct *sp, struct rcu_head *head,
+		void (*func)(struct rcu_head *head), bool start)
 {
 	unsigned long flags;
 
 	head->next = NULL;
 	head->func = func;
-	spin_lock_irqsave(&sp->queue_lock, flags);
+	spin_lock_irqsave(&sp->lock, flags);
 	rcu_batch_queue(&sp->batch_queue, head);
-	if (!sp->running) {
-		sp->running = true;
-		schedule_delayed_work(&sp->work, 0);
-	}
-	spin_unlock_irqrestore(&sp->queue_lock, flags);
+	if (rcu_batch_empty(&sp->batch_wait_gp))
+		srcu_gp_new(sp, start);
+	else
+		start = true;
+	spin_unlock_irqrestore(&sp->lock, flags);
+
+	return start;
+}
+
+/*
+ * Enqueue an SRCU callback on the specified srcu_struct structure,
+ * start grace-period processing if it is not already running.
+ */
+void call_srcu(struct srcu_struct *sp, struct rcu_head *head,
+		void (*func)(struct rcu_head *head))
+{
+	__call_srcu(sp, head, func, true);
 }
 EXPORT_SYMBOL_GPL(call_srcu);
 
@@ -398,17 +358,12 @@ static void wakeme_after_rcu(struct rcu_head *head)
 	complete(&rcu->completion);
 }
 
-static void srcu_advance_batches(struct srcu_struct *sp, int trycount);
-static void srcu_reschedule(struct srcu_struct *sp);
-
 /*
  * Helper function for synchronize_srcu() and synchronize_srcu_expedited().
  */
-static void __synchronize_srcu(struct srcu_struct *sp, int trycount)
+static void __synchronize_srcu(struct srcu_struct *sp, bool exp)
 {
 	struct rcu_synchronize rcu;
-	struct rcu_head *head = &rcu.head;
-	bool done = false;
 
 	rcu_lockdep_assert(!lock_is_held(&sp->dep_map) &&
 			   !lock_is_held(&rcu_bh_lock_map) &&
@@ -419,40 +374,17 @@ static void __synchronize_srcu(struct srcu_struct *sp, int trycount)
 	might_sleep();
 	init_completion(&rcu.completion);
 
-	head->next = NULL;
-	head->func = wakeme_after_rcu;
-	spin_lock_irq(&sp->queue_lock);
-	if (!sp->running) {
-		/* steal the processing owner */
-		sp->running = true;
-		rcu_batch_queue(&sp->batch_check0, head);
-		spin_unlock_irq(&sp->queue_lock);
-
-		srcu_advance_batches(sp, trycount);
-		if (!rcu_batch_empty(&sp->batch_done)) {
-			BUG_ON(sp->batch_done.head != head);
-			rcu_batch_dequeue(&sp->batch_done);
-			done = true;
-		}
-		/* give the processing owner to work_struct */
-		srcu_reschedule(sp);
-	} else {
-		rcu_batch_queue(&sp->batch_queue, head);
-		spin_unlock_irq(&sp->queue_lock);
+	if (!__call_srcu(sp, &rcu.head, wakeme_after_rcu, !exp)) {
+		synchronize_sched_expedited();
+		srcu_gp_accumref(&sp->rcu);
 	}
 
-	if (!done)
-		wait_for_completion(&rcu.completion);
+	wait_for_completion(&rcu.completion);
 }
 
 /**
  * synchronize_srcu - wait for prior SRCU read-side critical-section completion
  * @sp: srcu_struct with which to synchronize.
- *
- * Wait for the count to drain to zero of both indexes. To avoid the
- * possible starvation of synchronize_srcu(), it waits for the count of
- * the index=((->completed & 1) ^ 1) to drain to zero at first,
- * and then flip the completed and wait for the count of the other index.
  *
  * Can block; must be called from process context.
  *
@@ -463,9 +395,7 @@ static void __synchronize_srcu(struct srcu_struct *sp, int trycount)
  */
 void synchronize_srcu(struct srcu_struct *sp)
 {
-	__synchronize_srcu(sp, rcu_expedited
-			   ? SYNCHRONIZE_SRCU_EXP_TRYCOUNT
-			   : SYNCHRONIZE_SRCU_TRYCOUNT);
+	__synchronize_srcu(sp, !!rcu_expedited);
 }
 EXPORT_SYMBOL_GPL(synchronize_srcu);
 
@@ -485,7 +415,7 @@ EXPORT_SYMBOL_GPL(synchronize_srcu);
  */
 void synchronize_srcu_expedited(struct srcu_struct *sp)
 {
-	__synchronize_srcu(sp, SYNCHRONIZE_SRCU_EXP_TRYCOUNT);
+	__synchronize_srcu(sp, true);
 }
 EXPORT_SYMBOL_GPL(synchronize_srcu_expedited);
 
@@ -494,7 +424,10 @@ EXPORT_SYMBOL_GPL(synchronize_srcu_expedited);
  */
 void srcu_barrier(struct srcu_struct *sp)
 {
+	/* flush all queued callbacks to ->batch_done */
 	synchronize_srcu(sp);
+	/* flush all callbacks which may be being processed by kworker */
+	flush_work(&sp->work);
 }
 EXPORT_SYMBOL_GPL(srcu_barrier);
 
@@ -510,142 +443,3 @@ long srcu_batches_completed(struct srcu_struct *sp)
 	return sp->completed;
 }
 EXPORT_SYMBOL_GPL(srcu_batches_completed);
-
-#define SRCU_CALLBACK_BATCH	10
-#define SRCU_INTERVAL		1
-
-/*
- * Move any new SRCU callbacks to the first stage of the SRCU grace
- * period pipeline.
- */
-static void srcu_collect_new(struct srcu_struct *sp)
-{
-	if (!rcu_batch_empty(&sp->batch_queue)) {
-		spin_lock_irq(&sp->queue_lock);
-		rcu_batch_move(&sp->batch_check0, &sp->batch_queue);
-		spin_unlock_irq(&sp->queue_lock);
-	}
-}
-
-/*
- * Core SRCU state machine.  Advance callbacks from ->batch_check0 to
- * ->batch_check1 and then to ->batch_done as readers drain.
- */
-static void srcu_advance_batches(struct srcu_struct *sp, int trycount)
-{
-	int idx = 1 ^ (sp->completed & 1);
-
-	/*
-	 * Because readers might be delayed for an extended period after
-	 * fetching ->completed for their index, at any point in time there
-	 * might well be readers using both idx=0 and idx=1.  We therefore
-	 * need to wait for readers to clear from both index values before
-	 * invoking a callback.
-	 */
-
-	if (rcu_batch_empty(&sp->batch_check0) &&
-	    rcu_batch_empty(&sp->batch_check1))
-		return; /* no callbacks need to be advanced */
-
-	if (!try_check_zero(sp, idx, trycount))
-		return; /* failed to advance, will try after SRCU_INTERVAL */
-
-	/*
-	 * The callbacks in ->batch_check1 have already done with their
-	 * first zero check and flip back when they were enqueued on
-	 * ->batch_check0 in a previous invocation of srcu_advance_batches().
-	 * (Presumably try_check_zero() returned false during that
-	 * invocation, leaving the callbacks stranded on ->batch_check1.)
-	 * They are therefore ready to invoke, so move them to ->batch_done.
-	 */
-	rcu_batch_move(&sp->batch_done, &sp->batch_check1);
-
-	if (rcu_batch_empty(&sp->batch_check0))
-		return; /* no callbacks need to be advanced */
-	srcu_flip(sp);
-
-	/*
-	 * The callbacks in ->batch_check0 just finished their
-	 * first check zero and flip, so move them to ->batch_check1
-	 * for future checking on the other idx.
-	 */
-	rcu_batch_move(&sp->batch_check1, &sp->batch_check0);
-
-	/*
-	 * SRCU read-side critical sections are normally short, so check
-	 * at least twice in quick succession after a flip.
-	 */
-	trycount = trycount < 2 ? 2 : trycount;
-	if (!try_check_zero(sp, idx^1, trycount))
-		return; /* failed to advance, will try after SRCU_INTERVAL */
-
-	/*
-	 * The callbacks in ->batch_check1 have now waited for all
-	 * pre-existing readers using both idx values.  They are therefore
-	 * ready to invoke, so move them to ->batch_done.
-	 */
-	rcu_batch_move(&sp->batch_done, &sp->batch_check1);
-}
-
-/*
- * Invoke a limited number of SRCU callbacks that have passed through
- * their grace period.  If there are more to do, SRCU will reschedule
- * the workqueue.
- */
-static void srcu_invoke_callbacks(struct srcu_struct *sp)
-{
-	int i;
-	struct rcu_head *head;
-
-	for (i = 0; i < SRCU_CALLBACK_BATCH; i++) {
-		head = rcu_batch_dequeue(&sp->batch_done);
-		if (!head)
-			break;
-		local_bh_disable();
-		head->func(head);
-		local_bh_enable();
-	}
-}
-
-/*
- * Finished one round of SRCU grace period.  Start another if there are
- * more SRCU callbacks queued, otherwise put SRCU into not-running state.
- */
-static void srcu_reschedule(struct srcu_struct *sp)
-{
-	bool pending = true;
-
-	if (rcu_batch_empty(&sp->batch_done) &&
-	    rcu_batch_empty(&sp->batch_check1) &&
-	    rcu_batch_empty(&sp->batch_check0) &&
-	    rcu_batch_empty(&sp->batch_queue)) {
-		spin_lock_irq(&sp->queue_lock);
-		if (rcu_batch_empty(&sp->batch_done) &&
-		    rcu_batch_empty(&sp->batch_check1) &&
-		    rcu_batch_empty(&sp->batch_check0) &&
-		    rcu_batch_empty(&sp->batch_queue)) {
-			sp->running = false;
-			pending = false;
-		}
-		spin_unlock_irq(&sp->queue_lock);
-	}
-
-	if (pending)
-		schedule_delayed_work(&sp->work, SRCU_INTERVAL);
-}
-
-/*
- * This is the work-queue function that handles SRCU grace periods.
- */
-void process_srcu(struct work_struct *work)
-{
-	struct srcu_struct *sp;
-
-	sp = container_of(work, struct srcu_struct, work.work);
-
-	srcu_collect_new(sp);
-	srcu_advance_batches(sp, 1);
-	srcu_invoke_callbacks(sp);
-	srcu_reschedule(sp);
-}
-EXPORT_SYMBOL_GPL(process_srcu);

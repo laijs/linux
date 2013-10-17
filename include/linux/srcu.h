@@ -16,7 +16,7 @@
  * Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA 02111-1307, USA.
  *
  * Copyright (C) IBM Corporation, 2006
- * Copyright (C) Fujitsu, 2012
+ * Copyright (C) Fujitsu, 2012-2013
  *
  * Author: Paul McKenney <paulmck@us.ibm.com>
  *	   Lai Jiangshan <laijs@cn.fujitsu.com>
@@ -29,13 +29,15 @@
 #ifndef _LINUX_SRCU_H
 #define _LINUX_SRCU_H
 
-#include <linux/mutex.h>
+#include <linux/atomic.h>
+#include <linux/percpu.h>
+#include <linux/lockdep.h>
 #include <linux/rcupdate.h>
+#include <linux/spinlock.h>
 #include <linux/workqueue.h>
 
 struct srcu_struct_array {
 	unsigned long c[2];
-	unsigned long seq[2];
 };
 
 struct rcu_batch {
@@ -47,16 +49,14 @@ struct rcu_batch {
 struct srcu_struct {
 	unsigned completed;
 	struct srcu_struct_array __percpu *per_cpu_ref;
-	spinlock_t queue_lock; /* protect ->batch_queue, ->running */
-	bool running;
-	/* callbacks just queued */
+
+	atomic_t gp_ref ____cacheline_aligned_in_smp;
+	spinlock_t lock;
 	struct rcu_batch batch_queue;
-	/* callbacks try to do the first check_zero */
-	struct rcu_batch batch_check0;
-	/* callbacks done with the first check_zero and the flip */
-	struct rcu_batch batch_check1;
+	struct rcu_batch batch_wait_gp;
 	struct rcu_batch batch_done;
-	struct delayed_work work;
+	struct rcu_head rcu;
+	struct work_struct work;
 #ifdef CONFIG_DEBUG_LOCK_ALLOC
 	struct lockdep_map dep_map;
 #endif /* #ifdef CONFIG_DEBUG_LOCK_ALLOC */
@@ -88,13 +88,12 @@ void process_srcu(struct work_struct *work);
 	{								\
 		.completed = -300,					\
 		.per_cpu_ref = &name##_srcu_array,			\
-		.queue_lock = __SPIN_LOCK_UNLOCKED(name.queue_lock),	\
-		.running = false,					\
+		.gp_ref = ATOMIC_INIT(0),				\
+		.lock = __SPIN_LOCK_UNLOCKED(name.lock),		\
 		.batch_queue = RCU_BATCH_INIT(name.batch_queue),	\
-		.batch_check0 = RCU_BATCH_INIT(name.batch_check0),	\
-		.batch_check1 = RCU_BATCH_INIT(name.batch_check1),	\
+		.batch_wait_gp = RCU_BATCH_INIT(name.batch_wait_gp),	\
 		.batch_done = RCU_BATCH_INIT(name.batch_done),		\
-		.work = __DELAYED_WORK_INITIALIZER(name.work, process_srcu, 0),\
+		.work = __WORK_INITIALIZER(name.work, process_srcu),	\
 		__SRCU_DEP_MAP_INIT(name)				\
 	}
 
@@ -109,6 +108,40 @@ void process_srcu(struct work_struct *work);
 #define DEFINE_STATIC_SRCU(name)					\
 	static DEFINE_PER_CPU(struct srcu_struct_array, name##_srcu_array);\
 	static struct srcu_struct name = __SRCU_STRUCT_INIT(name);
+
+/*
+ * Counts the new reader in the appropriate per-CPU element of the
+ * srcu_struct.  Must be called from process context.
+ * Returns an index that must be passed to the matching srcu_read_unlock().
+ */
+static inline int __srcu_read_lock(struct srcu_struct *sp) __acquires(sp)
+{
+	int idx;
+
+	rcu_read_lock_sched();
+	idx = ACCESS_ONCE(sp->completed) & 0x1;
+	__this_cpu_inc(sp->per_cpu_ref->c[idx]);
+	rcu_read_unlock_sched();
+
+	return idx;
+}
+
+/*
+ * Removes the count for the old reader from the appropriate per-CPU
+ * element of the srcu_struct.  Note that this may well be a different
+ * CPU than that which was incremented by the corresponding srcu_read_lock().
+ * Must be called from process context.
+ */
+void __srcu_read_unlock_special(struct srcu_struct *sp);
+static inline void __srcu_read_unlock(struct srcu_struct *sp, int idx) __releases(sp)
+{
+	rcu_read_lock_sched();
+	if (likely((ACCESS_ONCE(sp->completed) & 0x1) == idx))
+		__this_cpu_dec(sp->per_cpu_ref->c[idx]);
+	else
+		__srcu_read_unlock_special(sp);
+	rcu_read_unlock_sched();
+}
 
 /**
  * call_srcu() - Queue a callback for invocation after an SRCU grace period
@@ -131,8 +164,6 @@ void call_srcu(struct srcu_struct *sp, struct rcu_head *head,
 		void (*func)(struct rcu_head *head));
 
 void cleanup_srcu_struct(struct srcu_struct *sp);
-int __srcu_read_lock(struct srcu_struct *sp) __acquires(sp);
-void __srcu_read_unlock(struct srcu_struct *sp, int idx) __releases(sp);
 void synchronize_srcu(struct srcu_struct *sp);
 void synchronize_srcu_expedited(struct srcu_struct *sp);
 long srcu_batches_completed(struct srcu_struct *sp);
