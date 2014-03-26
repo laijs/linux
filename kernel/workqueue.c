@@ -995,21 +995,15 @@ static struct worker *find_worker_executing_work(struct worker_pool *pool,
  * move_linked_works - move linked works to a list
  * @work: start of series of works to be scheduled
  * @head: target list to append @work to
- * @nextp: out paramter for nested worklist walking
  *
  * Schedule linked works starting from @work to @head.  Work series to
  * be scheduled starts at @work and includes any consecutive work with
  * WORK_STRUCT_LINKED set in its predecessor.
  *
- * If @nextp is not NULL, it's updated to point to the next work of
- * the last scheduled work.  This allows move_linked_works() to be
- * nested inside outer list_for_each_entry_safe().
- *
  * CONTEXT:
  * spin_lock_irq(pool->lock).
  */
-static void move_linked_works(struct work_struct *work, struct list_head *head,
-			      struct work_struct **nextp)
+static void move_linked_works(struct work_struct *work, struct list_head *head)
 {
 	struct work_struct *n;
 
@@ -1022,14 +1016,6 @@ static void move_linked_works(struct work_struct *work, struct list_head *head,
 		if (!(*work_data_bits(work) & WORK_STRUCT_LINKED))
 			break;
 	}
-
-	/*
-	 * If we're already inside safe list traversal and have moved
-	 * multiple works to the scheduled queue, the next position
-	 * needs to be updated.
-	 */
-	if (nextp)
-		*nextp = n;
 }
 
 /**
@@ -1095,7 +1081,7 @@ static void pwq_activate_delayed_work(struct work_struct *work)
 	struct pool_workqueue *pwq = get_work_pwq(work);
 
 	trace_workqueue_activate_work(work);
-	move_linked_works(work, &pwq->worklist, NULL);
+	move_linked_works(work, &pwq->worklist);
 	if (list_empty(&pwq->work_pwqnode))
 		list_add_tail(&pwq->work_pwqnode, &pwq->pool->work_pwqlist);
 	__clear_bit(WORK_STRUCT_DELAYED_BIT, work_data_bits(work));
@@ -1995,7 +1981,7 @@ __acquires(&pool->lock)
 	 */
 	collision = find_worker_executing_work(pool, work);
 	if (unlikely(collision)) {
-		move_linked_works(work, &collision->scheduled, NULL);
+		move_linked_works(work, &collision->scheduled);
 		return;
 	}
 
@@ -2127,7 +2113,7 @@ static void process_pwq_works(struct worker *worker, struct pool_workqueue *pwq)
 			list_first_entry(&pwq->worklist,
 					 struct work_struct, entry);
 
-		move_linked_works(work, &worker->scheduled, NULL);
+		move_linked_works(work, &worker->scheduled);
 		if (list_empty(&pwq->worklist))
 			list_del_init(&pwq->work_pwqnode);
 
