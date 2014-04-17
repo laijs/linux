@@ -562,6 +562,11 @@ void idr_remove(struct idr *idp, int id)
 	if (id < 0)
 		return;
 
+	if (id > idr_max(idp->layers)) {
+		idr_remove_warning(id);
+		return;
+	}
+
 	sub_remove(idp, (idp->layers - 1) * IDR_BITS, id);
 	if (idp->top && idp->top->count == 1 && (idp->layers > 1) &&
 	    idp->top->ary[0]) {
