@@ -457,8 +457,10 @@ int idr_alloc(struct idr *idr, void *ptr, int start, int end, gfp_t gfp_mask)
 	/* sanity checks */
 	if (WARN_ON_ONCE(start < 0))
 		return -EINVAL;
-	if (unlikely(max < start))
+	if (unlikely(end > 0 && start == end))
 		return -ENOSPC;
+	if (WARN_ON_ONCE(max < start))
+		return -EINVAL;
 
 	/* allocate id */
 	id = idr_get_empty_slot(idr, start, pa, gfp_mask, NULL);
@@ -551,10 +553,7 @@ void idr_remove(struct idr *idp, int id)
 	struct idr_layer *p;
 	struct idr_layer *to_free;
 
-	if (id < 0)
-		return;
-
-	if (id > idr_max(idp->layers)) {
+	if (id < 0 || id > idr_max(idp->layers)) {
 		idr_remove_warning(id);
 		return;
 	}
@@ -1012,7 +1011,7 @@ void ida_remove(struct ida *ida, int id)
 	int n;
 	struct ida_bitmap *bitmap;
 
-	if (idr_id > idr_max(ida->idr.layers))
+	if (id < 0 || idr_id > idr_max(ida->idr.layers))
 		goto err;
 
 	/* clear full bits while looking up the leaf idr_layer */
@@ -1078,14 +1077,17 @@ int ida_simple_get(struct ida *ida, unsigned int start, unsigned int end,
 	unsigned int max;
 	unsigned long flags;
 
-	BUG_ON((int)start < 0);
-	BUG_ON((int)end < 0);
+	if (WARN_ON_ONCE((int)start < 0))
+		return -EINVAL;
 
-	if (end == 0)
-		max = 0x80000000;
+	if ((int)end <= 0)
+		max = INT_MAX;
 	else {
-		BUG_ON(end < start);
 		max = end - 1;
+		if (unlikely(start == end))
+			return -ENOSPC;
+		if (WARN_ON_ONCE(max < start))
+			return -EINVAL;
 	}
 
 again:
@@ -1120,7 +1122,6 @@ void ida_simple_remove(struct ida *ida, unsigned int id)
 {
 	unsigned long flags;
 
-	BUG_ON((int)id < 0);
 	spin_lock_irqsave(&simple_ida_lock, flags);
 	ida_remove(ida, id);
 	spin_unlock_irqrestore(&simple_ida_lock, flags);
