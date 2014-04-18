@@ -1093,13 +1093,14 @@ int ida_simple_get(struct ida *ida, unsigned int start, unsigned int end,
 	unsigned int max;
 	unsigned long flags;
 
-	BUG_ON((int)start < 0);
-	BUG_ON((int)end < 0);
+	if (WARN_ON_ONCE(((int)start < 0) || ((int)end < 0)))
+		return -EINVAL;
 
 	if (end == 0)
 		max = 0x80000000;
 	else {
-		BUG_ON(end < start);
+		if (WARN_ON_ONCE(end < start))
+			return -EINVAL;
 		max = end - 1;
 	}
 
@@ -1135,7 +1136,7 @@ void ida_simple_remove(struct ida *ida, unsigned int id)
 {
 	unsigned long flags;
 
-	BUG_ON((int)id < 0);
+	WARN_ON_ONCE((int)id < 0);
 	spin_lock_irqsave(&simple_ida_lock, flags);
 	ida_remove(ida, id);
 	spin_unlock_irqrestore(&simple_ida_lock, flags);
