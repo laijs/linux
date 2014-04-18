@@ -1001,17 +1001,6 @@ int ida_get_new_above(struct ida *ida, int starting_id, int *p_id)
 
 	*p_id = id;
 
-	/* Each leaf node can handle nearly a thousand slots and the
-	 * whole idea of ida is to have small memory foot print.
-	 * Throw away extra resources one by one after each successful
-	 * allocation.
-	 */
-	if (ida->idr.id_free_cnt || ida->free_bitmap) {
-		struct idr_layer *p = get_from_free_list(&ida->idr);
-		if (p)
-			kmem_cache_free(idr_layer_cache, p);
-	}
-
 	return 0;
 }
 EXPORT_SYMBOL(ida_get_new_above);
