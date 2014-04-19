@@ -20,11 +20,9 @@
  * that id to this code and it returns your pointer.
  */
 
-#ifndef TEST                        // to test in user space...
 #include <linux/slab.h>
 #include <linux/init.h>
 #include <linux/export.h>
-#endif
 #include <linux/err.h>
 #include <linux/string.h>
 #include <linux/idr.h>
