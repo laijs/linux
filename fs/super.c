@@ -799,34 +799,18 @@ void emergency_remount(void)
  */
 
 static DEFINE_IDA(unnamed_dev_ida);
-static DEFINE_SPINLOCK(unnamed_dev_lock);/* protects the above */
 
 int get_anon_bdev(dev_t *p)
 {
 	int dev;
-	int error;
 
- retry:
-	if (ida_pre_get(&unnamed_dev_ida, GFP_ATOMIC) == 0)
-		return -ENOMEM;
-	spin_lock(&unnamed_dev_lock);
 	/* Many userspace utilities consider an FSID of 0 invalid.
 	 * Always return at least 1 from get_anon_bdev.
 	 */
-	error = ida_get_new_above(&unnamed_dev_ida, 1, &dev);
-	spin_unlock(&unnamed_dev_lock);
-	if (error == -EAGAIN)
-		/* We raced and lost with another CPU. */
-		goto retry;
-	else if (error)
-		return -EAGAIN;
+	dev = ida_simple_get(&unnamed_dev_ida, 1, 1 << MINORBITS, GFP_ATOMIC);
+	if (dev < 0)
+		return dev;
 
-	if (dev == (1 << MINORBITS)) {
-		spin_lock(&unnamed_dev_lock);
-		ida_remove(&unnamed_dev_ida, dev);
-		spin_unlock(&unnamed_dev_lock);
-		return -EMFILE;
-	}
 	*p = MKDEV(0, dev & MINORMASK);
 	return 0;
 }
@@ -834,10 +818,7 @@ EXPORT_SYMBOL(get_anon_bdev);
 
 void free_anon_bdev(dev_t dev)
 {
-	int slot = MINOR(dev);
-	spin_lock(&unnamed_dev_lock);
-	ida_remove(&unnamed_dev_ida, slot);
-	spin_unlock(&unnamed_dev_lock);
+	ida_simple_remove(&unnamed_dev_ida, MINOR(dev));
 }
 EXPORT_SYMBOL(free_anon_bdev);
 
