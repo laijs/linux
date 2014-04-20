@@ -401,7 +401,6 @@ nfs4_insert_state_owner_locked(struct nfs4_state_owner *new)
 	struct rb_node **p = &server->state_owners.rb_node,
 		       *parent = NULL;
 	struct nfs4_state_owner *sp;
-	int err;
 
 	while (*p != NULL) {
 		parent = *p;
@@ -418,9 +417,8 @@ nfs4_insert_state_owner_locked(struct nfs4_state_owner *new)
 			return sp;
 		}
 	}
-	err = ida_get_new(&server->openowner_id, &new->so_seqid.owner_id);
-	if (err)
-		return ERR_PTR(err);
+	if (new->so_seqid.owner_id < 0)
+		return ERR_PTR(new->so_seqid.owner_id);
 	rb_link_node(&new->so_server_node, parent, p);
 	rb_insert_color(&new->so_server_node, &server->state_owners);
 	return new;
@@ -433,7 +431,6 @@ nfs4_remove_state_owner_locked(struct nfs4_state_owner *sp)
 
 	if (!RB_EMPTY_NODE(&sp->so_server_node))
 		rb_erase(&sp->so_server_node, &server->state_owners);
-	ida_remove(&server->openowner_id, sp->so_seqid.owner_id);
 }
 
 static void
@@ -473,6 +470,8 @@ nfs4_alloc_state_owner(struct nfs_server *server,
 	spin_lock_init(&sp->so_lock);
 	INIT_LIST_HEAD(&sp->so_states);
 	nfs4_init_seqid_counter(&sp->so_seqid);
+	sp->so_seqid.owner_id = ida_simple_get(&server->openowner_id, 0, 0,
+					       gfp_flags);
 	atomic_set(&sp->so_count, 1);
 	INIT_LIST_HEAD(&sp->so_lru);
 	seqcount_init(&sp->so_reclaim_seqcount);
@@ -500,6 +499,10 @@ nfs4_drop_state_owner(struct nfs4_state_owner *sp)
 
 static void nfs4_free_state_owner(struct nfs4_state_owner *sp)
 {
+	if (sp->so_seqid.owner_id >= 0) {
+		ida_simple_remove(&sp->so_server->openowner_id,
+				  sp->so_seqid.owner_id);
+	}
 	nfs4_destroy_seqid_counter(&sp->so_seqid);
 	put_rpccred(sp->so_cred);
 	kfree(sp);
@@ -552,13 +555,9 @@ struct nfs4_state_owner *nfs4_get_state_owner(struct nfs_server *server,
 	new = nfs4_alloc_state_owner(server, cred, gfp_flags);
 	if (new == NULL)
 		goto out;
-	do {
-		if (ida_pre_get(&server->openowner_id, gfp_flags) == 0)
-			break;
-		spin_lock(&clp->cl_lock);
-		sp = nfs4_insert_state_owner_locked(new);
-		spin_unlock(&clp->cl_lock);
-	} while (sp == ERR_PTR(-EAGAIN));
+	spin_lock(&clp->cl_lock);
+	sp = nfs4_insert_state_owner_locked(new);
+	spin_unlock(&clp->cl_lock);
 	if (sp != new)
 		nfs4_free_state_owner(new);
 out:
