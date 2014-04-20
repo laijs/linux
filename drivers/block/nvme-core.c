@@ -2508,18 +2508,10 @@ static DEFINE_IDA(nvme_instance_ida);
 
 static int nvme_set_instance(struct nvme_dev *dev)
 {
-	int instance, error;
+	int instance;
 
-	do {
-		if (!ida_pre_get(&nvme_instance_ida, GFP_KERNEL))
-			return -ENODEV;
-
-		spin_lock(&dev_list_lock);
-		error = ida_get_new(&nvme_instance_ida, &instance);
-		spin_unlock(&dev_list_lock);
-	} while (error == -EAGAIN);
-
-	if (error)
+	instance = ida_simple_get(&nvme_instance_ida, 0, 0, GFP_KERNEL);
+	if (instance < 0)
 		return -ENODEV;
 
 	dev->instance = instance;
@@ -2528,9 +2520,7 @@ static int nvme_set_instance(struct nvme_dev *dev)
 
 static void nvme_release_instance(struct nvme_dev *dev)
 {
-	spin_lock(&dev_list_lock);
-	ida_remove(&nvme_instance_ida, dev->instance);
-	spin_unlock(&dev_list_lock);
+	ida_simple_remove(&nvme_instance_ida, dev->instance);
 }
 
 static void nvme_free_namespaces(struct nvme_dev *dev)
