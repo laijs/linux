@@ -3091,7 +3091,7 @@ static int mtip_free_orphan(struct driver_data *dd)
 	}
 
 	mtip_hw_debugfs_exit(dd);
-	ida_remove(&rssd_index_ida, dd->index);
+	ida_simple_remove(&rssd_index_ida, dd->index);
 
 	if (!test_bit(MTIP_DDF_INIT_DONE_BIT, &dd->dd_flag) &&
 			test_bit(MTIP_DDF_REBUILD_FAILED_BIT, &dd->dd_flag)) {
@@ -4290,7 +4290,7 @@ read_capacity_error:
 block_queue_alloc_init_error:
 	mtip_hw_debugfs_exit(dd);
 disk_index_error:
-	ida_remove(&rssd_index_ida, index);
+	ida_simple_remove(&rssd_index_ida, index);
 
 ida_get_error:
 	put_disk(dd->disk);
@@ -4351,7 +4351,7 @@ static int mtip_block_remove(struct driver_data *dd)
 		}
 		dd->disk  = NULL;
 
-		ida_remove(&rssd_index_ida, dd->index);
+		ida_simple_remove(&rssd_index_ida, dd->index);
 	} else {
 		dev_info(&dd->pdev->dev, "device %s surprise removal\n",
 						dd->disk->disk_name);
