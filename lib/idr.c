@@ -36,8 +36,13 @@
 /* Leave the possibility of an incomplete final layer */
 #define MAX_IDR_LEVEL ((MAX_IDR_SHIFT + IDR_BITS - 1) / IDR_BITS)
 
-/* Number of id_layer structs to leave in free list */
-#define MAX_IDR_FREE (MAX_IDR_LEVEL * 2)
+/*
+ * Number of idr_layer structs to leave in free list.
+ * When idr is not empty, we need atmost (MAX_IDR_LEVEL - 1) idr_layers
+ * to build up and atmost (MAX_IDR_LEVEL - 1) idr_layers to allocate down.
+ * When idr is empty need atmost MAX_IDR_LEVEL layers.
+ */
+#define MAX_IDR_FREE max((MAX_IDR_LEVEL * 2 - 2), MAX_IDR_LEVEL)
 
 static struct kmem_cache *idr_layer_cache;
 static DEFINE_PER_CPU(struct idr_layer *, idr_preload_head);
