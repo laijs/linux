@@ -34,7 +34,7 @@
 #define MAX_IDR_BIT		(1U << MAX_IDR_SHIFT)
 
 /* Leave the possibility of an incomplete final layer */
-#define MAX_IDR_LEVEL ((MAX_IDR_SHIFT + IDR_BITS - 1) / IDR_BITS)
+#define MAX_IDR_LEVEL DIV_ROUND_UP(MAX_IDR_SHIFT, IDR_BITS)
 
 /*
  * Number of idr_layer structs to leave in free list.
