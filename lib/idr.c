@@ -692,39 +692,18 @@ EXPORT_SYMBOL(idr_find_slowpath);
  * We check the return of @fn each time. If it returns anything other
  * than %0, we break out and return that value.
  *
- * The caller must serialize idr_for_each() vs idr_get_new() and idr_remove().
+ * The caller must serialize idr_for_each() vs idr_alloc() and idr_remove().
  */
 int idr_for_each(struct idr *idp,
 		 int (*fn)(int id, void *p, void *data), void *data)
 {
-	int n, id, max, error = 0;
-	struct idr_layer *p;
-	struct idr_layer *pa[MAX_IDR_LEVEL + 1];
-	struct idr_layer **paa = &pa[0];
+	void *p;
+	int id, error = 0;
 
-	n = idp->layers * IDR_BITS;
-	p = rcu_dereference_raw(idp->top);
-	max = idr_max(idp->layers);
-
-	id = 0;
-	while (id >= 0 && id <= max) {
-		while (n > 0 && p) {
-			n -= IDR_BITS;
-			*paa++ = p;
-			p = rcu_dereference_raw(p->ary[(id >> n) & IDR_MASK]);
-		}
-
-		if (p) {
-			error = fn(id, (void *)p, data);
-			if (error)
-				break;
-		}
-
-		id += 1 << n;
-		while (n < fls(id)) {
-			n += IDR_BITS;
-			p = *--paa;
-		}
+	idr_for_each_entry(idp, p, id) {
+		error = fn(id, (void *)p, data);
+		if (error)
+			break;
 	}
 
 	return error;
