@@ -2572,10 +2572,6 @@ void flush_workqueue(struct workqueue_struct *wq)
 
 	mutex_lock(&wq->mutex);
 
-	/* we might have raced, check again with mutex held */
-	if (wq->first_flusher != &this_flusher)
-		goto out_unlock;
-
 	wq->first_flusher = NULL;
 
 	WARN_ON_ONCE(!list_empty(&this_flusher.list));
@@ -2631,14 +2627,8 @@ void flush_workqueue(struct workqueue_struct *wq)
 		list_del_init(&next->list);
 		wq->first_flusher = next;
 
-		if (flush_workqueue_prep_pwqs(wq, wq->flush_color, -1))
-			break;
-
-		/*
-		 * Meh... this color is already done, clear first
-		 * flusher and repeat cascading.
-		 */
-		wq->first_flusher = NULL;
+		flush_workqueue_prep_pwqs(wq, wq->flush_color, -1);
+		break;
 	}
 
 out_unlock:
