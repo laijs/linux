@@ -2646,6 +2646,76 @@ out_unlock:
 }
 EXPORT_SYMBOL_GPL(flush_workqueue);
 
+void flush_workqueue_v2(struct workqueue_struct *wq)
+{
+	struct wq_flusher this_flusher = {
+		.done = COMPLETION_INITIALIZER_ONSTACK(this_flusher.done),
+	};
+	int work_color, prev_color, next_color;
+
+	lock_map_acquire(&wq->lockdep_map);
+	lock_map_release(&wq->lockdep_map);
+
+	mutex_lock(&wq->mutex);
+
+	work_color = wq->work_color;
+	prev_color = (work_color + WORK_NR_COLORS - 1) % WORK_NR_COLORS;
+	next_color = work_next_color(work_color);
+
+	list_add_tail(&this_flusher.list, &wq->flusher[work_color]);
+	if (!list_is_singler(&wq->flusher[work_color]))
+		goto unlock_and_wait;
+
+	if (atomic_read(wq->nr_cwqs_to_flush[next_color]) &&
+	    atomic_inc_not_zero(wq->nr_cwqs_to_flush[next_color])) {
+		struct wq_flusher overflow = {
+			.done = COMPLETION_INITIALIZER_ONSTACK(overflow.done),
+		};
+
+		list_add(&overflow.list, &wq->flusher[next_color]);
+		release_flush_ref(wq, next_color, work_color);
+
+		mutex_unlock(&wq->mutex);
+		wait_for_complete(&overflow.done);
+		mutex_lock(&wq->mutex);
+	}
+
+	WARN_ON_ONCE(atomic_read(&wq->flush_ref[work_color]));
+	WARN_ON_ONCE(atomic_read(&wq->flush_ref[next_color]));
+
+	atomic_inc(&wq->flush_ref[prev_color]); /* hold prev_color */
+	atomic_set(&wq->flush_ref[work_color], 1); /* held by prev_color */
+
+	for_each_pwq(pwq, wq) {
+		struct worker_pool *pool = pwq->pool;
+
+		spin_lock_irq(&pool->lock);
+
+		WARN_ON_ONCE(work_color != pwq->work_color);
+		WARN_ON_ONCE(pwq->nr_in_flight[next_color]);
+
+		if (pwq->nr_in_flight[work_color])
+			atomic_inc(&wq->flush_ref[work_color]);
+		pwq->work_color = next_color;
+
+		spin_unlock_irq(&pool->lock);
+	}
+
+	wq->work_color = next_color;
+
+	/*
+	 * It had synced with all pool->lock, wq->flusher[next_color]
+	 * is seen empty now and ready for next flush_workqueue().
+	 */
+	WARN_ON_ONCE(!list_empty(&wq->flusher[next_color]));
+
+	release_flush_ref(wq, prev_color, next_color);
+
+unlock_and_wait:
+	mutex_unlock(&wq->mutex);
+	wait_for_complete(&this_flusher.done);
+}
+
 /**
  * drain_workqueue - drain a workqueue
  * @wq: workqueue to drain
