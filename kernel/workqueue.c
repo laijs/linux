@@ -2423,267 +2423,27 @@ static void insert_wq_barrier(struct pool_workqueue *pwq,
 }
 
 /**
- * flush_workqueue_prep_pwqs - prepare pwqs for workqueue flushing
+ * advance_work_color - advance work color for workqueue flushing
  * @wq: workqueue being flushed
- * @flush_color: new flush color, < 0 for no-op
- * @work_color: new work color, < 0 for no-op
  *
  * Prepare pwqs for workqueue flushing.
  *
- * If @flush_color is non-negative, flush_color on all pwqs should be
- * -1.  If no pwq has in-flight commands at the specified color, all
- * pwq->flush_color's stay at -1 and %false is returned.  If any pwq
- * has in flight commands, its pwq->flush_color is set to
- * @flush_color, @wq->nr_pwqs_to_flush is updated accordingly, pwq
- * wakeup logic is armed and %true is returned.
- *
- * The caller should have initialized @wq->first_flusher prior to
- * calling this function with non-negative @flush_color.  If
- * @flush_color is negative, no flush color update is done and %false
- * is returned.
- *
- * If @work_color is non-negative, all pwqs should have the same
- * work_color which is previous to @work_color and all will be
- * advanced to @work_color.
- *
  * CONTEXT:
  * mutex_lock(wq->mutex).
- *
- * Return:
- * %true if @flush_color >= 0 and there's something to flush.  %false
- * otherwise.
  */
-static bool flush_workqueue_prep_pwqs(struct workqueue_struct *wq,
-				      int flush_color, int work_color)
+static void advance_work_color(struct workqueue_struct *wq);
 {
-	bool wait = false;
-	struct pool_workqueue *pwq;
-
-	if (flush_color >= 0) {
-		WARN_ON_ONCE(atomic_read(&wq->nr_pwqs_to_flush));
-		atomic_set(&wq->nr_pwqs_to_flush, 1);
-	}
-
-	for_each_pwq(pwq, wq) {
-		struct worker_pool *pool = pwq->pool;
-
-		spin_lock_irq(&pool->lock);
-
-		if (flush_color >= 0) {
-			WARN_ON_ONCE(pwq->flush_color != -1);
-
-			if (pwq->nr_in_flight[flush_color]) {
-				pwq->flush_color = flush_color;
-				atomic_inc(&wq->nr_pwqs_to_flush);
-				wait = true;
-			}
-		}
-
-		if (work_color >= 0) {
-			WARN_ON_ONCE(work_color != work_next_color(pwq->work_color));
-			pwq->work_color = work_color;
-		}
-
-		spin_unlock_irq(&pool->lock);
-	}
-
-	if (flush_color >= 0 && atomic_dec_and_test(&wq->nr_pwqs_to_flush))
-		complete(&wq->first_flusher->done);
-
-	return wait;
-}
-
-/**
- * flush_workqueue - ensure that any scheduled work has run to completion.
- * @wq: workqueue to flush
- *
- * This function sleeps until all work items which were queued on entry
- * have finished execution, but it is not livelocked by new incoming ones.
- */
-void flush_workqueue(struct workqueue_struct *wq)
-{
-	struct wq_flusher this_flusher = {
-		.list = LIST_HEAD_INIT(this_flusher.list),
-		.flush_color = -1,
-		.done = COMPLETION_INITIALIZER_ONSTACK(this_flusher.done),
-	};
-	int next_color;
-
-	lock_map_acquire(&wq->lockdep_map);
-	lock_map_release(&wq->lockdep_map);
-
-	mutex_lock(&wq->mutex);
-
-	/*
-	 * Start-to-wait phase
-	 */
-	next_color = work_next_color(wq->work_color);
-
-	if (next_color != wq->flush_color) {
-		/*
-		 * Color space is not full.  The current work_color
-		 * becomes our flush_color and work_color is advanced
-		 * by one.
-		 */
-		WARN_ON_ONCE(!list_empty(&wq->flusher_overflow));
-		this_flusher.flush_color = wq->work_color;
-		wq->work_color = next_color;
-
-		if (!wq->first_flusher) {
-			/* no flush in progress, become the first flusher */
-			WARN_ON_ONCE(wq->flush_color != this_flusher.flush_color);
-
-			wq->first_flusher = &this_flusher;
-
-			if (!flush_workqueue_prep_pwqs(wq, wq->flush_color,
-						       wq->work_color)) {
-				/* nothing to flush, done */
-				wq->flush_color = next_color;
-				wq->first_flusher = NULL;
-				goto out_unlock;
-			}
-		} else {
-			/* wait in queue */
-			WARN_ON_ONCE(wq->flush_color == this_flusher.flush_color);
-			list_add_tail(&this_flusher.list, &wq->flusher_queue);
-			flush_workqueue_prep_pwqs(wq, -1, wq->work_color);
-		}
-	} else {
-		/*
-		 * Oops, color space is full, wait on overflow queue.
-		 * The next flush completion will assign us
-		 * flush_color and transfer to flusher_queue.
-		 */
-		list_add_tail(&this_flusher.list, &wq->flusher_overflow);
-	}
-
-	mutex_unlock(&wq->mutex);
-
-	wait_for_completion(&this_flusher.done);
-
-	/*
-	 * Wake-up-and-cascade phase
-	 *
-	 * First flushers are responsible for cascading flushes and
-	 * handling overflow.  Non-first flushers can simply return.
-	 */
-	if (wq->first_flusher != &this_flusher)
-		return;
-
-	mutex_lock(&wq->mutex);
-
-	/* we might have raced, check again with mutex held */
-	if (wq->first_flusher != &this_flusher)
-		goto out_unlock;
-
-	wq->first_flusher = NULL;
-
-	WARN_ON_ONCE(!list_empty(&this_flusher.list));
-	WARN_ON_ONCE(wq->flush_color != this_flusher.flush_color);
-
-	while (true) {
-		struct wq_flusher *next, *tmp;
-
-		/* complete all the flushers sharing the current flush color */
-		list_for_each_entry_safe(next, tmp, &wq->flusher_queue, list) {
-			if (next->flush_color != wq->flush_color)
-				break;
-			list_del_init(&next->list);
-			complete(&next->done);
-		}
-
-		WARN_ON_ONCE(!list_empty(&wq->flusher_overflow) &&
-			     wq->flush_color != work_next_color(wq->work_color));
-
-		/* this flush_color is finished, advance by one */
-		wq->flush_color = work_next_color(wq->flush_color);
-
-		/* one color has been freed, handle overflow queue */
-		if (!list_empty(&wq->flusher_overflow)) {
-			/*
-			 * Assign the same color to all overflowed
-			 * flushers, advance work_color and append to
-			 * flusher_queue.  This is the start-to-wait
-			 * phase for these overflowed flushers.
-			 */
-			list_for_each_entry(tmp, &wq->flusher_overflow, list)
-				tmp->flush_color = wq->work_color;
-
-			wq->work_color = work_next_color(wq->work_color);
-
-			list_splice_tail_init(&wq->flusher_overflow,
-					      &wq->flusher_queue);
-			flush_workqueue_prep_pwqs(wq, -1, wq->work_color);
-		}
-
-		if (list_empty(&wq->flusher_queue)) {
-			WARN_ON_ONCE(wq->flush_color != wq->work_color);
-			break;
-		}
-
-		/*
-		 * Need to flush more colors.  Make the next flusher
-		 * the new first flusher and arm pwqs.
-		 */
-		WARN_ON_ONCE(wq->flush_color == wq->work_color);
-		WARN_ON_ONCE(wq->flush_color != next->flush_color);
-
-		list_del_init(&next->list);
-		wq->first_flusher = next;
-
-		if (flush_workqueue_prep_pwqs(wq, wq->flush_color, -1))
-			break;
-
-		/*
-		 * Meh... this color is already done, clear first
-		 * flusher and repeat cascading.
-		 */
-		wq->first_flusher = NULL;
-	}
-
-out_unlock:
-	mutex_unlock(&wq->mutex);
-}
-EXPORT_SYMBOL_GPL(flush_workqueue);
-
-void flush_workqueue_v2(struct workqueue_struct *wq)
-{
-	struct wq_flusher this_flusher = {
-		.done = COMPLETION_INITIALIZER_ONSTACK(this_flusher.done),
-	};
 	int work_color, prev_color, next_color;
-
-	lock_map_acquire(&wq->lockdep_map);
-	lock_map_release(&wq->lockdep_map);
-
-	mutex_lock(&wq->mutex);
+	struct pool_workqueue *pwq;
 
 	work_color = wq->work_color;
 	prev_color = (work_color + WORK_NR_COLORS - 1) % WORK_NR_COLORS;
 	next_color = work_next_color(work_color);
 
-	list_add_tail(&this_flusher.list, &wq->flusher[work_color]);
-	if (!list_is_singler(&wq->flusher[work_color]))
-		goto unlock_and_wait;
-
-	if (atomic_read(wq->nr_cwqs_to_flush[next_color]) &&
-	    atomic_inc_not_zero(wq->nr_cwqs_to_flush[next_color])) {
-		struct wq_flusher overflow = {
-			.done = COMPLETION_INITIALIZER_ONSTACK(overflow.done),
-		};
-
-		list_add(&overflow.list, &wq->flusher[next_color]);
-		release_flush_ref(wq, next_color, work_color);
-
-		mutex_unlock(&wq->mutex);
-		wait_for_complete(&overflow.done);
-		mutex_lock(&wq->mutex);
-	}
-
 	WARN_ON_ONCE(atomic_read(&wq->flush_ref[work_color]));
 	WARN_ON_ONCE(atomic_read(&wq->flush_ref[next_color]));
 
-	atomic_inc(&wq->flush_ref[prev_color]); /* hold prev_color */
+	atomic_inc(&wq->flush_ref[prev_color]); /* held by this function */
 	atomic_set(&wq->flush_ref[work_color], 1); /* held by prev_color */
 
 	for_each_pwq(pwq, wq) {
@@ -2710,11 +2470,60 @@ void flush_workqueue_v2(struct workqueue_struct *wq)
 	WARN_ON_ONCE(!list_empty(&wq->flusher[next_color]));
 
 	release_flush_ref(wq, prev_color, next_color);
+}
+
+/**
+ * flush_workqueue - ensure that any scheduled work has run to completion.
+ * @wq: workqueue to flush
+ *
+ * This function sleeps until all work items which were queued on entry
+ * have finished execution, but it is not livelocked by new incoming ones.
+ */
+void flush_workqueue(struct workqueue_struct *wq)
+{
+	struct wq_flusher this_flusher = {
+		.overflow_helper = 0,
+		.done = COMPLETION_INITIALIZER_ONSTACK(this_flusher.done),
+	};
+	int work_color, prev_color, next_color;
+
+	lock_map_acquire(&wq->lockdep_map);
+	lock_map_release(&wq->lockdep_map);
+
+	mutex_lock(&wq->mutex);
+
+	work_color = wq->work_color;
+	next_color = work_next_color(work_color);
+
+	list_add_tail(&this_flusher.list, &wq->flusher[work_color]);
+	if (!list_is_singler(&wq->flusher[work_color]))
+		goto unlock_and_wait;
+
+	if (atomic_read(wq->nr_cwqs_to_flush[next_color]) &&
+	    atomic_inc_not_zero(wq->nr_cwqs_to_flush[next_color])) {
+		struct wq_flusher *helper;
+
+		helper = list_first_entry(&wq->flusher[next_color],
+					  struct wq_flusher, list);
+
+		helper->overflow_helper = 1;
+		release_flush_ref(wq, next_color, work_color);
+		goto unlock_and_wait;
+	}
+
+	advance_work_color(wq);
 
 unlock_and_wait:
 	mutex_unlock(&wq->mutex);
 	wait_for_complete(&this_flusher.done);
+
+	if (this_flusher.overflow_helper) {
+		mutex_lock(&wq->mutex);
+		advance_work_color(wq);
+		mutex_unlock(&wq->mutex);
+	}
 }
+EXPORT_SYMBOL_GPL(flush_workqueue);
 
 /**
  * drain_workqueue - drain a workqueue
