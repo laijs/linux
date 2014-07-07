@@ -736,6 +736,11 @@ static bool need_more_worker(struct worker_pool *pool)
 	return !list_empty(&pool->work_pwqlist) && __need_more_worker(pool);
 }
 
+static bool pwq_need_more_worker(struct pool_workqueue *pwq)
+{
+	return !list_empty(&pwq->worklist) && __need_more_worker(pwq->pool);
+}
+
 /* Can I start working?  Called from busy but !running workers. */
 static bool may_start_working(struct worker_pool *pool)
 {
@@ -2110,10 +2115,12 @@ __acquires(&pool->lock)
 }
 
 /**
- * process_scheduled_works - process scheduled works
+ * process_top_works - process top works of a pwq
  * @worker: self
+ * @pwq: target pwq
  *
- * Process all scheduled works.  Please note that the scheduled list
+ * Move the first work and the linked works of the pwq to the scheduled list,
+ * and process all these scheduled works.  Please note that the scheduled list
  * may change while processing a work, so this function repeatedly
  * fetches a work from the top and executes it.
  *
@@ -2121,8 +2128,15 @@ __acquires(&pool->lock)
  * spin_lock_irq(pool->lock) which may be released and regrabbed
  * multiple times.
  */
-static void process_scheduled_works(struct worker *worker)
+static void process_top_works(struct worker *worker, struct pool_workqueue *pwq)
 {
+	struct work_struct *work = list_first_entry(&pwq->worklist,
+						    struct work_struct, entry);
+
+	move_linked_works(work, &worker->scheduled);
+	if (list_empty(&pwq->worklist))
+		list_del_init(&pwq->work_pwqnode);
+
 	while (!list_empty(&worker->scheduled)) {
 		struct work_struct *work = list_first_entry(&worker->scheduled,
 						struct work_struct, entry);
@@ -2148,15 +2162,7 @@ static void process_pwq_works(struct worker *worker, struct pool_workqueue *pwq)
 	int i;
 
 	for (i = 0; i < WORKS_PROCESS_BATCH; i++) {
-		struct work_struct *work =
-			list_first_entry(&pwq->worklist,
-					 struct work_struct, entry);
-
-		move_linked_works(work, &worker->scheduled);
-		if (list_empty(&pwq->worklist))
-			list_del_init(&pwq->work_pwqnode);
-
-		process_scheduled_works(worker);
+		process_top_works(worker, pwq);
 
 		if (!pwq_keep_working(pwq))
 			break;
@@ -2315,14 +2321,11 @@ repeat:
 		spin_lock_irq(&pool->lock);
 		rescuer->pool = pool;
 
-		/*
-		 * Slurp in all works issued via this workqueue and
-		 * process'em.
-		 */
 		WARN_ON_ONCE(!list_empty(&rescuer->scheduled));
-		list_splice_init(&pwq->worklist, &rescuer->scheduled);
 
-		process_scheduled_works(rescuer);
+		while (pwq_need_more_worker(pwq) && !pool->nr_idle)
+			process_top_works(rescuer, pwq);
+
 		spin_unlock_irq(&pool->lock);
 
 		worker_detach_from_pool(rescuer, pool);
@@ -2336,11 +2339,11 @@ repeat:
 		put_pwq(pwq);
 
 		/*
-		 * Leave this pool.  If pwq_keep_working() is %true, notify a
+		 * Leave this pool.  If pwq_need_more_worker() is %true, notify a
 		 * regular worker; otherwise, we end up with 0 concurrency
 		 * and stalling the execution.
 		 */
-		if (pwq_keep_working(pwq))
+		if (pwq_need_more_worker(pwq))
 			wake_up_worker(pool);
 
 		rescuer->pool = NULL;
