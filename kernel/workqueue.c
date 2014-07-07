@@ -102,6 +102,8 @@ enum {
 	RESCUER_NICE_LEVEL	= MIN_NICE,
 	HIGHPRI_NICE_LEVEL	= MIN_NICE,
 
+	WORKS_PROCESS_BATCH	= 256,
+
 	WQ_NAME_LEN		= 24,
 };
 
@@ -143,7 +145,7 @@ struct worker_pool {
 	int			id;		/* I: pool ID */
 	unsigned int		flags;		/* X: flags */
 
-	struct list_head	worklist;	/* L: list of pending works */
+	struct list_head	work_pwqlist;	/* L: list of pwqs with pending works */
 	int			nr_workers;	/* L: total number of workers */
 
 	/* nr_idle includes the ones off idle_list for rebinding */
@@ -199,6 +201,8 @@ struct pool_workqueue {
 						/* L: nr of in_flight works */
 	int			nr_active;	/* L: nr of active works */
 	int			max_active;	/* L: max active works */
+	struct list_head	work_pwqnode;	/* L: liked in pool's work_pwqlist */
+	struct list_head	worklist;	/* L: list of pending works */
 	struct list_head	delayed_works;	/* L: delayed works */
 	struct list_head	pwqs_node;	/* WR: node on wq->pwqs */
 	struct list_head	mayday_node;	/* MD: node on wq->maydays */
@@ -725,11 +729,11 @@ static bool __need_more_worker(struct worker_pool *pool)
  *
  * Note that, because unbound workers never contribute to nr_running, this
  * function will always return %true for unbound pools as long as the
- * worklist isn't empty.
+ * work_pwqlist isn't empty.
  */
 static bool need_more_worker(struct worker_pool *pool)
 {
-	return !list_empty(&pool->worklist) && __need_more_worker(pool);
+	return !list_empty(&pool->work_pwqlist) && __need_more_worker(pool);
 }
 
 /* Can I start working?  Called from busy but !running workers. */
@@ -738,10 +742,17 @@ static bool may_start_working(struct worker_pool *pool)
 	return pool->nr_idle;
 }
 
-/* Do I need to keep working?  Called from currently running workers. */
-static bool keep_working(struct worker_pool *pool)
+/* Need to keep working on the pwq?  Called from currently running workers. */
+static bool pwq_keep_working(struct pool_workqueue *pwq)
 {
-	return !list_empty(&pool->worklist) &&
+	return !list_empty(&pwq->worklist) &&
+		atomic_read(&pwq->pool->nr_running) <= 1;
+}
+
+/* Need to keep working on the pool?  Called from currently running workers. */
+static bool pool_keep_working(struct worker_pool *pool)
+{
+	return !list_empty(&pool->work_pwqlist) &&
 		atomic_read(&pool->nr_running) <= 1;
 }
 
@@ -848,7 +859,7 @@ struct task_struct *wq_worker_sleeping(struct task_struct *task, int cpu)
 
 	/*
 	 * The counterpart of the following dec_and_test, implied mb,
-	 * worklist not empty test sequence is in insert_work().
+	 * work_pwqlist not empty test sequence is in __queue_work().
 	 * Please read comment there.
 	 *
 	 * NOT_RUNNING is clear.  This means that we're bound to and
@@ -858,7 +869,7 @@ struct task_struct *wq_worker_sleeping(struct task_struct *task, int cpu)
 	 * lock is safe.
 	 */
 	if (atomic_dec_and_test(&pool->nr_running) &&
-	    !list_empty(&pool->worklist))
+	    !list_empty(&pool->work_pwqlist))
 		to_wakeup = first_idle_worker(pool);
 	return to_wakeup ? to_wakeup->task : NULL;
 }
@@ -892,7 +903,7 @@ static inline void worker_set_flags(struct worker *worker, unsigned int flags,
 	    !(worker->flags & WORKER_NOT_RUNNING)) {
 		if (wakeup) {
 			if (atomic_dec_and_test(&pool->nr_running) &&
-			    !list_empty(&pool->worklist))
+			    !list_empty(&pool->work_pwqlist))
 				wake_up_worker(pool);
 		} else
 			atomic_dec(&pool->nr_running);
@@ -1081,7 +1092,9 @@ static void pwq_activate_delayed_work(struct work_struct *work)
 	struct pool_workqueue *pwq = get_work_pwq(work);
 
 	trace_workqueue_activate_work(work);
-	move_linked_works(work, &pwq->pool->worklist, NULL);
+	move_linked_works(work, &pwq->worklist, NULL);
+	if (list_empty(&pwq->work_pwqnode))
+		list_add_tail(&pwq->work_pwqnode, &pwq->pool->work_pwqlist);
 	__clear_bit(WORK_STRUCT_DELAYED_BIT, work_data_bits(work));
 	pwq->nr_active++;
 }
@@ -1258,22 +1271,10 @@ fail:
 static void insert_work(struct pool_workqueue *pwq, struct work_struct *work,
 			struct list_head *head, unsigned int extra_flags)
 {
-	struct worker_pool *pool = pwq->pool;
-
 	/* we own @work, set data and link */
 	set_work_pwq(work, pwq, extra_flags);
 	list_add_tail(&work->entry, head);
 	get_pwq(pwq);
-
-	/*
-	 * Ensure either wq_worker_sleeping() sees the above
-	 * list_add_tail() or we see zero nr_running to avoid workers lying
-	 * around lazily while there are works to be processed.
-	 */
-	smp_mb();
-
-	if (__need_more_worker(pool))
-		wake_up_worker(pool);
 }
 
 /*
@@ -1382,7 +1383,21 @@ retry:
 	if (likely(pwq->nr_active < pwq->max_active)) {
 		trace_workqueue_activate_work(work);
 		pwq->nr_active++;
-		worklist = &pwq->pool->worklist;
+		worklist = &pwq->worklist;
+		if (list_empty(&pwq->work_pwqnode)) {
+			list_add_tail(&pwq->work_pwqnode,
+				      &pwq->pool->work_pwqlist);
+			/*
+			 * Ensure either wq_worker_sleeping() sees the above
+			 * list_add_tail() or we see zero nr_running to avoid
+			 * workers lying around lazily while there are works
+			 * to be processed.
+			 */
+			smp_mb();
+
+			if (__need_more_worker(pwq->pool))
+				wake_up_worker(pwq->pool);
+		}
 	} else {
 		work_flags |= WORK_STRUCT_DELAYED;
 		worklist = &pwq->delayed_works;
@@ -1822,9 +1837,8 @@ static void idle_worker_timeout(unsigned long __pool)
 	spin_unlock_irq(&pool->lock);
 }
 
-static void send_mayday(struct work_struct *work)
+static void send_mayday(struct pool_workqueue *pwq)
 {
-	struct pool_workqueue *pwq = get_work_pwq(work);
 	struct workqueue_struct *wq = pwq->wq;
 
 	lockdep_assert_held(&wq_mayday_lock);
@@ -1848,7 +1862,7 @@ static void send_mayday(struct work_struct *work)
 static void pool_mayday_timeout(unsigned long __pool)
 {
 	struct worker_pool *pool = (void *)__pool;
-	struct work_struct *work;
+	struct pool_workqueue *pwq;
 
 	spin_lock_irq(&wq_mayday_lock);		/* for wq->maydays */
 	spin_lock(&pool->lock);
@@ -1860,8 +1874,8 @@ static void pool_mayday_timeout(unsigned long __pool)
 		 * allocation deadlock.  Send distress signals to
 		 * rescuers.
 		 */
-		list_for_each_entry(work, &pool->worklist, entry)
-			send_mayday(work);
+		list_for_each_entry(pwq, &pool->work_pwqlist, work_pwqnode)
+			send_mayday(pwq);
 	}
 
 	spin_unlock(&pool->lock);
@@ -2131,6 +2145,39 @@ static void process_scheduled_works(struct worker *worker)
 }
 
 /**
+ * process_pwq_works - process pending works in a pwq
+ * @worker: self(worker to process works)
+ * @pwq: pwq with pending works
+ *
+ * Process all pending works.  Please note that the pending list
+ * may change while processing a work, so this function repeatedly
+ * fetches a work from the top and executes it.
+ *
+ * CONTEXT:
+ * spin_lock_irq(pool->lock) which may be released and regrabbed
+ * multiple times.
+ */
+static void process_pwq_works(struct worker *worker, struct pool_workqueue *pwq)
+{
+	int i;
+
+	for (i = 0; i < WORKS_PROCESS_BATCH; i++) {
+		struct work_struct *work =
+			list_first_entry(&pwq->worklist,
+					 struct work_struct, entry);
+
+		move_linked_works(work, &worker->scheduled, NULL);
+		if (list_empty(&pwq->worklist))
+			list_del_init(&pwq->work_pwqnode);
+
+		process_scheduled_works(worker);
+
+		if (!pwq_keep_working(pwq))
+			break;
+	}
+}
+
+/**
  * worker_thread - the worker thread function
  * @__worker: self
  *
@@ -2192,20 +2239,14 @@ recheck:
 	worker_clr_flags(worker, WORKER_PREP | WORKER_REBOUND);
 
 	do {
-		struct work_struct *work =
-			list_first_entry(&pool->worklist,
-					 struct work_struct, entry);
+		struct pool_workqueue *pwq =
+			list_first_entry(&pool->work_pwqlist,
+					 struct pool_workqueue, work_pwqnode);
 
-		if (likely(!(*work_data_bits(work) & WORK_STRUCT_LINKED))) {
-			/* optimization path, not strictly necessary */
-			process_one_work(worker, work);
-			if (unlikely(!list_empty(&worker->scheduled)))
-				process_scheduled_works(worker);
-		} else {
-			move_linked_works(work, &worker->scheduled, NULL);
-			process_scheduled_works(worker);
-		}
-	} while (keep_working(pool));
+		/* Process pwqs in Round Robin order */
+		list_move_tail(&pwq->work_pwqnode, &pool->work_pwqlist);
+		process_pwq_works(worker, pwq);
+	} while (pool_keep_working(pool));
 
 	worker_set_flags(worker, WORKER_PREP, false);
 sleep:
@@ -2248,7 +2289,6 @@ static int rescuer_thread(void *__rescuer)
 {
 	struct worker *rescuer = __rescuer;
 	struct workqueue_struct *wq = rescuer->rescue_wq;
-	struct list_head *scheduled = &rescuer->scheduled;
 	bool should_stop;
 
 	set_user_nice(current, RESCUER_NICE_LEVEL);
@@ -2278,7 +2318,6 @@ repeat:
 		struct pool_workqueue *pwq = list_first_entry(&wq->maydays,
 					struct pool_workqueue, mayday_node);
 		struct worker_pool *pool = pwq->pool;
-		struct work_struct *work, *n;
 
 		__set_current_state(TASK_RUNNING);
 		list_del_init(&pwq->mayday_node);
@@ -2295,9 +2334,7 @@ repeat:
 		 * process'em.
 		 */
 		WARN_ON_ONCE(!list_empty(&rescuer->scheduled));
-		list_for_each_entry_safe(work, n, &pool->worklist, entry)
-			if (get_work_pwq(work) == pwq)
-				move_linked_works(work, scheduled, &n);
+		list_splice_init(&pwq->worklist, &rescuer->scheduled);
 
 		process_scheduled_works(rescuer);
 		spin_unlock_irq(&pool->lock);
@@ -2313,11 +2350,11 @@ repeat:
 		put_pwq(pwq);
 
 		/*
-		 * Leave this pool.  If keep_working() is %true, notify a
+		 * Leave this pool.  If pwq_keep_working() is %true, notify a
 		 * regular worker; otherwise, we end up with 0 concurrency
 		 * and stalling the execution.
 		 */
-		if (keep_working(pool))
+		if (pwq_keep_working(pwq))
 			wake_up_worker(pool);
 
 		rescuer->pool = NULL;
@@ -3389,7 +3426,7 @@ static int init_worker_pool(struct worker_pool *pool)
 	pool->cpu = -1;
 	pool->node = NUMA_NO_NODE;
 	pool->flags |= POOL_DISASSOCIATED;
-	INIT_LIST_HEAD(&pool->worklist);
+	INIT_LIST_HEAD(&pool->work_pwqlist);
 	INIT_LIST_HEAD(&pool->idle_list);
 	hash_init(pool->busy_hash);
 
@@ -3447,7 +3484,7 @@ static void put_unbound_pool(struct worker_pool *pool)
 
 	/* sanity checks */
 	if (WARN_ON(!(pool->cpu < 0)) ||
-	    WARN_ON(!list_empty(&pool->worklist)))
+	    WARN_ON(!list_empty(&pool->work_pwqlist)))
 		return;
 
 	/* release id and unhash */
@@ -3663,6 +3700,8 @@ static void init_pwq(struct pool_workqueue *pwq, struct workqueue_struct *wq,
 	pwq->wq = wq;
 	pwq->flush_color = -1;
 	pwq->refcnt = 1;
+	INIT_LIST_HEAD(&pwq->work_pwqnode);
+	INIT_LIST_HEAD(&pwq->worklist);
 	INIT_LIST_HEAD(&pwq->delayed_works);
 	INIT_LIST_HEAD(&pwq->pwqs_node);
 	INIT_LIST_HEAD(&pwq->mayday_node);
@@ -4487,8 +4526,8 @@ static void wq_unbind_fn(struct work_struct *work)
 		/*
 		 * Sched callbacks are disabled now.  Zap nr_running.
 		 * After this, nr_running stays zero and need_more_worker()
-		 * and keep_working() are always true as long as the
-		 * worklist is not empty.  This pool now behaves as an
+		 * and [pool|pwq]_keep_working() are always true as long as
+		 * the worklist is not empty.  This pool now behaves as an
 		 * unbound (in terms of concurrency management) pool which
 		 * are served by workers tied to the pool.
 		 */
@@ -4729,7 +4768,7 @@ EXPORT_SYMBOL_GPL(work_on_cpu);
  *
  * Start freezing workqueues.  After this function returns, all freezable
  * workqueues will queue new works to their delayed_works list instead of
- * pool->worklist.
+ * pwq->worklist.
  *
  * CONTEXT:
  * Grabs and releases wq_pool_mutex, wq->mutex and pool->lock's.
@@ -4804,7 +4843,7 @@ out_unlock:
  * thaw_workqueues - thaw workqueues
  *
  * Thaw workqueues.  Normal queueing is restored and all collected
- * frozen works are transferred to their respective pool worklists.
+ * frozen works are transferred to their respective pwq worklists.
  *
  * CONTEXT:
  * Grabs and releases wq_pool_mutex, wq->mutex and pool->lock's.
