@@ -1875,13 +1875,16 @@ static void pool_mayday_timeout(unsigned long __pool)
  * @pool: pool to create a new worker for
  *
  * Create a new worker for @pool if necessary.  @pool is guaranteed to
- * have at least one idle worker on return from this function.  If
- * creating a new worker takes longer than MAYDAY_INTERVAL, mayday is
+ * make some progresses on return from this function.
+ *   1) success to create a new idle worker.  Or
+ *   2) cool down a while after it failed.  Or
+ *   3) condition changed (no longer need to create worker) after it failed.
+ * In any case, the caller will recheck the condition and retry when needed,
+ * so this function doesn't need to retry.
+ *
+ * If creating a new worker takes longer than MAYDAY_INTERVAL, mayday is
  * sent to all rescuers with works scheduled on @pool to resolve
  * possible allocation deadlock.
- *
- * On return, need_to_create_worker() is guaranteed to be %false and
- * may_start_working() %true.
  *
  * LOCKING:
  * spin_lock_irq(pool->lock) which may be released and regrabbed
@@ -1892,38 +1895,26 @@ static void maybe_create_worker(struct worker_pool *pool)
 __releases(&pool->lock)
 __acquires(&pool->lock)
 {
-restart:
+	struct worker *worker;
+
 	spin_unlock_irq(&pool->lock);
 
 	/* if we don't make progress in MAYDAY_INITIAL_TIMEOUT, call for help */
 	mod_timer(&pool->mayday_timer, jiffies + MAYDAY_INITIAL_TIMEOUT);
 
-	while (true) {
-		struct worker *worker;
-
-		worker = create_worker(pool);
-		if (worker) {
-			del_timer_sync(&pool->mayday_timer);
-			spin_lock_irq(&pool->lock);
-			start_worker(worker);
-			if (WARN_ON_ONCE(need_to_create_worker(pool)))
-				goto restart;
-			return;
-		}
-
-		if (!need_to_create_worker(pool))
-			break;
-
-		schedule_timeout_interruptible(CREATE_COOLDOWN);
-
-		if (!need_to_create_worker(pool))
-			break;
+	worker = create_worker(pool);
+	if (worker) {
+		del_timer_sync(&pool->mayday_timer);
+		spin_lock_irq(&pool->lock);
+		start_worker(worker);
+		return;
 	}
+
+	if (need_to_create_worker(pool))
+		schedule_timeout_interruptible(CREATE_COOLDOWN);
 
 	del_timer_sync(&pool->mayday_timer);
 	spin_lock_irq(&pool->lock);
-	if (need_to_create_worker(pool))
-		goto restart;
 }
 
 /**
@@ -1933,10 +1924,6 @@ restart:
  * Assume the manager role and manage the worker pool @worker belongs
  * to.  At any given time, there can be only zero or one manager per
  * pool.  The exclusion is handled automatically by this function.
- *
- * The caller can safely start processing works on false return.  On
- * true return, it's guaranteed that need_to_create_worker() is false
- * and may_start_working() is true.
  *
  * CONTEXT:
  * spin_lock_irq(pool->lock) which may be released and regrabbed
