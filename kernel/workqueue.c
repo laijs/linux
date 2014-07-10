@@ -181,6 +181,7 @@ struct worker_pool {
 	 * from get_work_pool().
 	 */
 	struct rcu_head		rcu;
+	struct work_struct	unbound_pool_destruction; /* destroy the pool */
 } ____cacheline_aligned_in_smp;
 
 /*
@@ -3331,9 +3332,6 @@ static void rcu_free_pool(struct rcu_head *rcu)
  */
 static void put_unbound_pool(struct worker_pool *pool)
 {
-	DECLARE_COMPLETION_ONSTACK(detach_completion);
-	struct worker *worker;
-
 	lockdep_assert_held(&wq_pool_mutex);
 
 	if (--pool->refcnt)
@@ -3348,6 +3346,22 @@ static void put_unbound_pool(struct worker_pool *pool)
 	if (pool->id >= 0)
 		idr_remove(&worker_pool_idr, pool->id);
 	hash_del(&pool->hash_node);
+
+	schedule_work(&pool->unbound_pool_destruction);
+}
+
+static void destroy_unbound_pool(struct work_struct *work)
+{
+	DECLARE_COMPLETION_ONSTACK(detach_completion);
+	struct worker_pool *pool = container_of(work, struct worker_pool,
+						unbound_pool_destruction);
+	struct worker *worker;
+
+	if (WARN_ON(pool->refcnt) || WARN_ON(!(pool->cpu < 0)) ||
+	    WARN_ON(!list_empty(&pool->worklist)))
+		return;
+
+	mutex_lock(&wq_pool_mutex);
 
 	/*
 	 * Become the manager and destroy all workers.  Grabbing
@@ -3378,6 +3392,8 @@ static void put_unbound_pool(struct worker_pool *pool)
 
 	/* sched-RCU protected to allow dereferences from get_work_pool() */
 	call_rcu_sched(&pool->rcu, rcu_free_pool);
+
+	mutex_unlock(&wq_pool_mutex);
 }
 
 /**
@@ -3414,6 +3430,7 @@ static int init_worker_pool(struct worker_pool *pool)
 
 	ida_init(&pool->worker_ida);
 	INIT_HLIST_NODE(&pool->hash_node);
+	INIT_WORK(&pool->unbound_pool_destruction, destroy_unbound_pool);
 	pool->refcnt = 1;
 
 	/* shouldn't fail above this point */
