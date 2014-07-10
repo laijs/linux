@@ -146,7 +146,7 @@ struct worker_pool {
 	struct list_head	worklist;	/* L: list of pending works */
 	int			nr_workers;	/* L: total number of workers */
 
-	/* nr_idle includes the ones off idle_list for rebinding */
+	/* count for all the workers in the idle_list and the manager */
 	int			nr_idle;	/* L: currently idle ones */
 
 	struct list_head	idle_list;	/* X: list of idle workers */
@@ -754,8 +754,7 @@ static bool need_to_create_worker(struct worker_pool *pool)
 /* Do we have too many workers and should some go away? */
 static bool too_many_workers(struct worker_pool *pool)
 {
-	bool managing = mutex_is_locked(&pool->manager_arb);
-	int nr_idle = pool->nr_idle + managing; /* manager is considered idle */
+	int nr_idle = pool->nr_idle;
 	int nr_busy = pool->nr_workers - nr_idle;
 
 	return nr_idle > 2 && (nr_idle - 2) * MAX_IDLE_WORKERS_RATIO >= nr_busy;
@@ -1906,7 +1905,12 @@ static bool manage_workers(struct worker *worker)
 	if (!mutex_trylock(&pool->manager_arb))
 		return false;
 
+	/* current worker becomes the manager, count it into nr_idle */
+	pool->nr_idle++;
+
 	maybe_create_worker(pool);
+
+	pool->nr_idle--;
 
 	mutex_unlock(&pool->manager_arb);
 
