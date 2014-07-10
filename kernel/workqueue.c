@@ -161,7 +161,6 @@ struct worker_pool {
 	struct mutex		manager_arb;	/* manager arbitration */
 	struct mutex		attach_mutex;	/* attach/detach exclusion */
 	struct list_head	workers;	/* A: attached workers */
-	struct completion	*detach_completion; /* all workers detached */
 
 	struct ida		worker_ida;	/* worker IDs for task name */
 
@@ -1656,19 +1655,14 @@ static void worker_attach_to_pool(struct worker *worker,
 static void worker_detach_from_pool(struct worker *worker,
 				    struct worker_pool *pool)
 {
-	struct completion *detach_completion = NULL;
-
 	mutex_lock(&pool->attach_mutex);
 	list_del(&worker->node);
-	if (list_empty(&pool->workers))
-		detach_completion = pool->detach_completion;
+	if (list_empty(&pool->workers) && !pool->refcnt)
+		schedule_work(&pool->unbound_pool_destruction);
 	mutex_unlock(&pool->attach_mutex);
 
 	/* clear leftover flags without pool->lock after it is detached */
 	worker->flags &= ~(WORKER_UNBOUND | WORKER_REBOUND);
-
-	if (detach_completion)
-		complete(detach_completion);
 }
 
 /**
@@ -3352,10 +3346,10 @@ static void put_unbound_pool(struct worker_pool *pool)
 
 static void destroy_unbound_pool(struct work_struct *work)
 {
-	DECLARE_COMPLETION_ONSTACK(detach_completion);
 	struct worker_pool *pool = container_of(work, struct worker_pool,
 						unbound_pool_destruction);
 	struct worker *worker;
+	bool detach_completion;
 
 	if (WARN_ON(pool->refcnt) || WARN_ON(!(pool->cpu < 0)) ||
 	    WARN_ON(!list_empty(&pool->worklist)))
@@ -3377,21 +3371,19 @@ static void destroy_unbound_pool(struct work_struct *work)
 	spin_unlock_irq(&pool->lock);
 
 	mutex_lock(&pool->attach_mutex);
-	if (!list_empty(&pool->workers))
-		pool->detach_completion = &detach_completion;
+	detach_completion = list_empty(&pool->workers);
 	mutex_unlock(&pool->attach_mutex);
-
-	if (pool->detach_completion)
-		wait_for_completion(pool->detach_completion);
 
 	mutex_unlock(&pool->manager_arb);
 
-	/* shut down the timers */
-	del_timer_sync(&pool->idle_timer);
-	del_timer_sync(&pool->mayday_timer);
+	if (detach_completion) {
+		/* shut down the timers */
+		del_timer_sync(&pool->idle_timer);
+		del_timer_sync(&pool->mayday_timer);
 
-	/* sched-RCU protected to allow dereferences from get_work_pool() */
-	call_rcu_sched(&pool->rcu, rcu_free_pool);
+		/* sched-RCU protected to allow dereferences from get_work_pool() */
+		call_rcu_sched(&pool->rcu, rcu_free_pool);
+	}
 
 	mutex_unlock(&wq_pool_mutex);
 }
