@@ -157,8 +157,6 @@ struct worker_pool {
 	DECLARE_HASHTABLE(busy_hash, BUSY_WORKER_HASH_ORDER);
 						/* L: hash of busy workers */
 
-	/* see manage_workers() for details on the two manager mutexes */
-	struct mutex		manager_arb;	/* manager arbitration */
 	struct mutex		attach_mutex;	/* attach/detach exclusion */
 	struct list_head	workers;	/* A: attached workers */
 
@@ -1875,35 +1873,19 @@ __acquires(&pool->lock)
  *
  * Assume the manager role and manage the worker pool @worker belongs
  * to.  At any given time, there can be only zero or one manager per
- * pool.  The exclusion is handled automatically by this function.
+ * pool.  The exclusion is handled automatically by this function
+ * via increasing the pool->nr_idle to disallow any new manager.
  *
  * CONTEXT:
  * spin_lock_irq(pool->lock) which may be released and regrabbed
- * multiple times.  Does GFP_KERNEL allocations.
+ * multiple times.  The conditions that the caller verified while
+ * holding the lock before calling the function might no longer be true.
+ * Does GFP_KERNEL allocations.
  *
- * Return:
- * %false if the pool don't need management and the caller can safely start
- * processing works, %true indicates that the function released pool->lock
- * and reacquired it to perform some management function and that the
- * conditions that the caller verified while holding the lock before
- * calling the function might no longer be true.
  */
-static bool manage_workers(struct worker *worker)
+static void manage_workers(struct worker *worker)
 {
 	struct worker_pool *pool = worker->pool;
-
-	/*
-	 * Anyone who successfully grabs manager_arb wins the arbitration
-	 * and becomes the manager.  mutex_trylock() on pool->manager_arb
-	 * failure while holding pool->lock reliably indicates that someone
-	 * else is managing the pool and the worker which failed trylock
-	 * can proceed to executing work items.  This means that anyone
-	 * grabbing manager_arb is responsible for actually performing
-	 * manager duties.  If manager_arb is grabbed and released without
-	 * actual management, the pool may stall indefinitely.
-	 */
-	if (!mutex_trylock(&pool->manager_arb))
-		return false;
 
 	/* current worker becomes the manager, count it into nr_idle */
 	pool->nr_idle++;
@@ -1912,13 +1894,9 @@ static bool manage_workers(struct worker *worker)
 
 	pool->nr_idle--;
 
-	mutex_unlock(&pool->manager_arb);
-
 	/* destroy_unbound_pool() missed destroying this manager, restart it */
 	if (unlikely(!pool->refcnt) && !WARN_ON(!(pool->cpu < 0)))
 		schedule_work(&pool->unbound_pool_destruction);
-
-	return true;
 }
 
 /**
@@ -2113,8 +2091,10 @@ recheck:
 		goto sleep;
 
 	/* do we need to manage? */
-	if (unlikely(!may_start_working(pool)) && manage_workers(worker))
+	if (unlikely(!may_start_working(pool))) {
+		manage_workers(worker);
 		goto recheck;
+	}
 
 	/*
 	 * ->scheduled list can only be filled while a worker is
@@ -3422,7 +3402,6 @@ static int init_worker_pool(struct worker_pool *pool)
 	setup_timer(&pool->mayday_timer, pool_mayday_timeout,
 		    (unsigned long)pool);
 
-	mutex_init(&pool->manager_arb);
 	mutex_init(&pool->attach_mutex);
 	INIT_LIST_HEAD(&pool->workers);
 
