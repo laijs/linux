@@ -745,10 +745,10 @@ static bool keep_working(struct worker_pool *pool)
 		atomic_read(&pool->nr_running) <= 1;
 }
 
-/* Do we need a new worker?  Called from manager. */
+/* Do we need a new worker?  Called from manager and mayday timer. */
 static bool need_to_create_worker(struct worker_pool *pool)
 {
-	return need_more_worker(pool) && !may_start_working(pool);
+	return need_more_worker(pool) && list_empty(&pool->idle_list);
 }
 
 /* Do we have too many workers and should some go away? */
