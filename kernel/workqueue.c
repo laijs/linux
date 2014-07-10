@@ -1909,6 +1909,11 @@ static bool manage_workers(struct worker *worker)
 	maybe_create_worker(pool);
 
 	mutex_unlock(&pool->manager_arb);
+
+	/* destroy_unbound_pool() missed destroying this manager, restart it */
+	if (unlikely(!pool->refcnt) && !WARN_ON(!(pool->cpu < 0)))
+		schedule_work(&pool->unbound_pool_destruction);
+
 	return true;
 }
 
@@ -3358,25 +3363,22 @@ static void destroy_unbound_pool(struct work_struct *work)
 	mutex_lock(&wq_pool_mutex);
 
 	/*
-	 * Become the manager and destroy all workers.  Grabbing
-	 * manager_arb prevents @pool's workers from blocking on
-	 * attach_mutex.
+	 * All the workers are in the idle_list except the manager and
+	 * the being created worker, the manager will restart this
+	 * destroy_unbound_pool() if it happens.
 	 */
-	mutex_lock(&pool->manager_arb);
-
 	spin_lock_irq(&pool->lock);
 	while ((worker = first_idle_worker(pool)))
 		destroy_worker(worker);
-	WARN_ON(pool->nr_workers || pool->nr_idle);
 	spin_unlock_irq(&pool->lock);
 
 	mutex_lock(&pool->attach_mutex);
 	detach_completion = list_empty(&pool->workers);
 	mutex_unlock(&pool->attach_mutex);
 
-	mutex_unlock(&pool->manager_arb);
-
 	if (detach_completion) {
+		WARN_ON(pool->nr_workers || pool->nr_idle);
+
 		/* shut down the timers */
 		del_timer_sync(&pool->idle_timer);
 		del_timer_sync(&pool->mayday_timer);
