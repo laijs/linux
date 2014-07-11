@@ -3309,49 +3309,6 @@ static bool wqattrs_equal(const struct workqueue_attrs *a,
 	return true;
 }
 
-/**
- * init_worker_pool - initialize a newly zalloc'd worker_pool
- * @pool: worker_pool to initialize
- *
- * Initiailize a newly zalloc'd @pool.  It also allocates @pool->attrs.
- *
- * Return: 0 on success, -errno on failure.  Even on failure, all fields
- * inside @pool proper are initialized and put_unbound_pool() can be called
- * on @pool safely to release it.
- */
-static int init_worker_pool(struct worker_pool *pool)
-{
-	spin_lock_init(&pool->lock);
-	pool->id = -1;
-	pool->cpu = -1;
-	pool->node = NUMA_NO_NODE;
-	pool->flags |= POOL_DISASSOCIATED;
-	INIT_LIST_HEAD(&pool->worklist);
-	INIT_LIST_HEAD(&pool->idle_list);
-	hash_init(pool->busy_hash);
-
-	init_timer_deferrable(&pool->idle_timer);
-	pool->idle_timer.function = idle_worker_timeout;
-	pool->idle_timer.data = (unsigned long)pool;
-
-	setup_timer(&pool->mayday_timer, pool_mayday_timeout,
-		    (unsigned long)pool);
-
-	mutex_init(&pool->manager_arb);
-	mutex_init(&pool->attach_mutex);
-	INIT_LIST_HEAD(&pool->workers);
-
-	ida_init(&pool->worker_ida);
-	INIT_HLIST_NODE(&pool->hash_node);
-	pool->refcnt = 1;
-
-	/* shouldn't fail above this point */
-	pool->attrs = alloc_workqueue_attrs(GFP_KERNEL);
-	if (!pool->attrs)
-		return -ENOMEM;
-	return 0;
-}
-
 static void rcu_free_pool(struct rcu_head *rcu)
 {
 	struct worker_pool *pool = container_of(rcu, struct worker_pool, rcu);
@@ -3421,6 +3378,49 @@ static void put_unbound_pool(struct worker_pool *pool)
 
 	/* sched-RCU protected to allow dereferences from get_work_pool() */
 	call_rcu_sched(&pool->rcu, rcu_free_pool);
+}
+
+/**
+ * init_worker_pool - initialize a newly zalloc'd worker_pool
+ * @pool: worker_pool to initialize
+ *
+ * Initiailize a newly zalloc'd @pool.  It also allocates @pool->attrs.
+ *
+ * Return: 0 on success, -errno on failure.  Even on failure, all fields
+ * inside @pool proper are initialized and put_unbound_pool() can be called
+ * on @pool safely to release it.
+ */
+static int init_worker_pool(struct worker_pool *pool)
+{
+	spin_lock_init(&pool->lock);
+	pool->id = -1;
+	pool->cpu = -1;
+	pool->node = NUMA_NO_NODE;
+	pool->flags |= POOL_DISASSOCIATED;
+	INIT_LIST_HEAD(&pool->worklist);
+	INIT_LIST_HEAD(&pool->idle_list);
+	hash_init(pool->busy_hash);
+
+	init_timer_deferrable(&pool->idle_timer);
+	pool->idle_timer.function = idle_worker_timeout;
+	pool->idle_timer.data = (unsigned long)pool;
+
+	setup_timer(&pool->mayday_timer, pool_mayday_timeout,
+		    (unsigned long)pool);
+
+	mutex_init(&pool->manager_arb);
+	mutex_init(&pool->attach_mutex);
+	INIT_LIST_HEAD(&pool->workers);
+
+	ida_init(&pool->worker_ida);
+	INIT_HLIST_NODE(&pool->hash_node);
+	pool->refcnt = 1;
+
+	/* shouldn't fail above this point */
+	pool->attrs = alloc_workqueue_attrs(GFP_KERNEL);
+	if (!pool->attrs)
+		return -ENOMEM;
+	return 0;
 }
 
 /**
