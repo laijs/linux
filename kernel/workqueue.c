@@ -1862,12 +1862,12 @@ static void pool_mayday_timeout(unsigned long __pool)
 		 */
 		list_for_each_entry(work, &pool->worklist, entry)
 			send_mayday(work);
+
+		mod_timer(&pool->mayday_timer, jiffies + MAYDAY_INTERVAL);
 	}
 
 	spin_unlock(&pool->lock);
 	spin_unlock_irq(&wq_mayday_lock);
-
-	mod_timer(&pool->mayday_timer, jiffies + MAYDAY_INTERVAL);
 }
 
 /**
@@ -1909,7 +1909,6 @@ restart:
 
 		worker = create_worker(pool);
 		if (worker) {
-			del_timer_sync(&pool->mayday_timer);
 			spin_lock_irq(&pool->lock);
 			start_worker(worker);
 			if (WARN_ON_ONCE(need_to_create_worker(pool)))
@@ -1926,7 +1925,6 @@ restart:
 			break;
 	}
 
-	del_timer_sync(&pool->mayday_timer);
 	spin_lock_irq(&pool->lock);
 	if (need_to_create_worker(pool))
 		goto restart;
