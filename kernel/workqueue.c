@@ -152,17 +152,17 @@ struct worker_pool {
 	struct list_head	idle_list;	/* X: list of idle workers */
 	struct timer_list	idle_timer;	/* L: worker idle timeout */
 	struct timer_list	mayday_timer;	/* L: SOS timer for workers */
+	struct timer_list	cooldown_timer;	/* L: cool down before retry */
 
-	/* a workers is either on busy_hash or idle_list, or the manager */
+	/* a workers is either on busy_hash or idle_list */
 	DECLARE_HASHTABLE(busy_hash, BUSY_WORKER_HASH_ORDER);
 						/* L: hash of busy workers */
 
-	/* see manage_workers() for details on the two manager mutexes */
-	struct mutex		manager_arb;	/* manager arbitration */
 	struct mutex		attach_mutex;	/* attach/detach exclusion */
 	struct list_head	workers;	/* A: attached workers */
 	struct completion	*detach_completion; /* all workers detached */
 
+	struct kthread_work	creater_work;	/* L: work for creating a new worker */
 	struct ida		worker_ida;	/* worker IDs for task name */
 
 	struct workqueue_attrs	*attrs;		/* I: worker attributes */
@@ -291,6 +291,10 @@ static DEFINE_SPINLOCK(wq_mayday_lock);	/* protects wq->maydays list */
 
 static LIST_HEAD(workqueues);		/* PL: list of all workqueues */
 static bool workqueue_freezing;		/* PL: have wqs started freezing? */
+
+/* kthread worker for creating workers for pools */
+static DEFINE_KTHREAD_WORKER(kworker_creater);
+static struct task_struct *kworker_creater_thread __read_mostly;
 
 /* the per-cpu worker pools */
 static DEFINE_PER_CPU_SHARED_ALIGNED(struct worker_pool [NR_STD_WORKER_POOLS],
@@ -732,12 +736,6 @@ static bool need_more_worker(struct worker_pool *pool)
 	return !list_empty(&pool->worklist) && __need_more_worker(pool);
 }
 
-/* Can I start working?  Called from busy but !running workers. */
-static bool may_start_working(struct worker_pool *pool)
-{
-	return pool->nr_idle;
-}
-
 /* Do I need to keep working?  Called from currently running workers. */
 static bool keep_working(struct worker_pool *pool)
 {
@@ -745,17 +743,10 @@ static bool keep_working(struct worker_pool *pool)
 		atomic_read(&pool->nr_running) <= 1;
 }
 
-/* Do we need a new worker?  Called from manager. */
-static bool need_to_create_worker(struct worker_pool *pool)
-{
-	return need_more_worker(pool) && !may_start_working(pool);
-}
-
 /* Do we have too many workers and should some go away? */
 static bool too_many_workers(struct worker_pool *pool)
 {
-	bool managing = mutex_is_locked(&pool->manager_arb);
-	int nr_idle = pool->nr_idle + managing; /* manager is considered idle */
+	int nr_idle = pool->nr_idle;
 	int nr_busy = pool->nr_workers - nr_idle;
 
 	return nr_idle > 2 && (nr_idle - 2) * MAX_IDLE_WORKERS_RATIO >= nr_busy;
@@ -1722,8 +1713,13 @@ static struct worker *create_worker(struct worker_pool *pool)
 	/* start the newly created worker */
 	spin_lock_irq(&pool->lock);
 	worker->pool->nr_workers++;
-	worker_enter_idle(worker);
+	/*
+	 * Wake up the worker at first and then queue it to the idle_list,
+	 * so that it is ensued that the wq_worker_sleeping() sees the worker
+	 * had been migrated properly when sees the worker in the idle_list.
+	 */
 	wake_up_process(worker->task);
+	worker_enter_idle(worker);
 	spin_unlock_irq(&pool->lock);
 
 	return worker;
@@ -1821,15 +1817,17 @@ static void pool_mayday_timeout(unsigned long __pool)
 	spin_lock_irq(&wq_mayday_lock);		/* for wq->maydays */
 	spin_lock(&pool->lock);
 
-	if (need_to_create_worker(pool)) {
-		/*
-		 * We've been trying to create a new worker but
-		 * haven't been successful.  We might be hitting an
-		 * allocation deadlock.  Send distress signals to
-		 * rescuers.
-		 */
-		list_for_each_entry(work, &pool->worklist, entry)
-			send_mayday(work);
+	if (!pool->nr_idle) {
+		if (need_more_worker(pool)) {
+			/*
+			 * We've been trying to create a new worker but
+			 * haven't been successful.  We might be hitting an
+			 * allocation deadlock.  Send distress signals to
+			 * rescuers.
+			 */
+			list_for_each_entry(work, &pool->worklist, entry)
+				send_mayday(work);
+		}
 
 		mod_timer(&pool->mayday_timer, jiffies + MAYDAY_INTERVAL);
 	}
@@ -1838,101 +1836,71 @@ static void pool_mayday_timeout(unsigned long __pool)
 	spin_unlock_irq(&wq_mayday_lock);
 }
 
-/**
- * maybe_create_worker - create a new worker if necessary
- * @pool: pool to create a new worker for
- *
- * Create a new worker for @pool if necessary.  @pool is guaranteed to
- * have at least one idle worker on return from this function.  If
- * creating a new worker takes longer than MAYDAY_INTERVAL, mayday is
- * sent to all rescuers with works scheduled on @pool to resolve
- * possible allocation deadlock.
- *
- * On return, need_to_create_worker() is guaranteed to be %false and
- * may_start_working() %true.
- *
- * LOCKING:
- * spin_lock_irq(pool->lock) which may be released and regrabbed
- * multiple times.  Does GFP_KERNEL allocations.  Called only from
- * manager.
- *
- * Return:
- * %false if no action was taken and pool->lock stayed locked, %true
- * otherwise.
- */
-static bool maybe_create_worker(struct worker_pool *pool)
-__releases(&pool->lock)
-__acquires(&pool->lock)
+static void pool_cooldown_timeout(unsigned long __pool)
 {
-	if (!need_to_create_worker(pool))
-		return false;
-restart:
-	spin_unlock_irq(&pool->lock);
+	struct worker_pool *pool = (void *)__pool;
 
+	spin_lock_irq(&pool->lock);
+	if (!pool->nr_idle)
+		queue_kthread_work(&kworker_creater, &pool->creater_work);
+	spin_unlock_irq(&pool->lock);
+}
+
+/*
+ * Start the mayday timer and the creater when pool->nr_idle is reduced to 0.
+ *
+ * Any moment when pool->nr_idle == 0, the mayday timer must be active
+ * (pending or running) to ensure the mayday can be sent, and at least one
+ * of the creater_work or the cooldown timer must be active to ensure
+ * the creating is in progress or standby.
+ */
+static void start_creater_work(struct worker_pool *pool)
+{
 	/* if we don't make progress in MAYDAY_INITIAL_TIMEOUT, call for help */
 	mod_timer(&pool->mayday_timer, jiffies + MAYDAY_INITIAL_TIMEOUT);
 
-	while (true) {
-		if (create_worker(pool) || !need_to_create_worker(pool))
-			break;
-
-		schedule_timeout_interruptible(CREATE_COOLDOWN);
-
-		if (!need_to_create_worker(pool))
-			break;
-	}
-
-	spin_lock_irq(&pool->lock);
-	if (need_to_create_worker(pool))
-		goto restart;
-	return true;
+	queue_kthread_work(&kworker_creater, &pool->creater_work);
 }
 
 /**
- * manage_workers - manage worker pool
- * @worker: self
+ * pool_create_worker - create a new workqueue worker when needed
+ * @work: the struct kthread_work creater_work of the target pool
  *
- * Assume the manager role and manage the worker pool @worker belongs
- * to.  At any given time, there can be only zero or one manager per
- * pool.  The exclusion is handled automatically by this function.
+ * The routine of the creater_work to create a new worker for the pool.
+ * The creater_work must be requested anytime when the last worker
+ * goes to process work item. And it should create a worker in some
+ * conditions when it is invoked:
  *
- * The caller can safely start processing works on false return.  On
- * true return, it's guaranteed that need_to_create_worker() is false
- * and may_start_working() is true.
+ * 1) pool->nr_idle == 0:
+ *    It must create a worker or else the pool will lead to lengthy stall.
+ * 2) pool->nr_idle == 1 and there is no running worker
+ *    It should create a worker but not strictly needed. It happens when
+ *    a work item was just finished and the worker is available, but
+ *    creater_work would be requested again if a new work item is queued.
+ *    So it is better to create a worker in this case to avoid
+ *    the creater_work being requested often without doing any thing.
+ * 3) other case
+ *    Doesn't need to create an additional worker
  *
  * CONTEXT:
- * spin_lock_irq(pool->lock) which may be released and regrabbed
- * multiple times.  Does GFP_KERNEL allocations.
- *
- * Return:
- * %false if the pool don't need management and the caller can safely start
- * processing works, %true indicates that the function released pool->lock
- * and reacquired it to perform some management function and that the
- * conditions that the caller verified while holding the lock before
- * calling the function might no longer be true.
+ * Might sleep.  Does GFP_KERNEL allocations.  Called from kthread_work.
  */
-static bool manage_workers(struct worker *worker)
+static void pool_create_worker(struct kthread_work *work)
 {
-	struct worker_pool *pool = worker->pool;
-	bool ret = false;
+	struct worker_pool *pool = container_of(work, struct worker_pool,
+						creater_work);
+	int nr_idle;
 
-	/*
-	 * Anyone who successfully grabs manager_arb wins the arbitration
-	 * and becomes the manager.  mutex_trylock() on pool->manager_arb
-	 * failure while holding pool->lock reliably indicates that someone
-	 * else is managing the pool and the worker which failed trylock
-	 * can proceed to executing work items.  This means that anyone
-	 * grabbing manager_arb is responsible for actually performing
-	 * manager duties.  If manager_arb is grabbed and released without
-	 * actual management, the pool may stall indefinitely.
-	 */
-	if (!mutex_trylock(&pool->manager_arb))
-		return ret;
+	spin_lock_irq(&pool->lock);
+	nr_idle = pool->nr_idle;
+	spin_unlock_irq(&pool->lock);
 
-	ret |= maybe_create_worker(pool);
+	if (nr_idle == 0 || (nr_idle == 1 && !atomic_read(&pool->nr_running))) {
+		if (create_worker(pool))
+			return;
 
-	mutex_unlock(&pool->manager_arb);
-	return ret;
+		mod_timer(&pool->cooldown_timer, jiffies + CREATE_COOLDOWN);
+	}
 }
 
 /**
@@ -2121,14 +2089,14 @@ woke_up:
 	}
 
 	worker_leave_idle(worker);
-recheck:
+
 	/* no more worker necessary? */
 	if (!need_more_worker(pool))
 		goto sleep;
 
-	/* do we need to manage? */
-	if (unlikely(!may_start_working(pool)) && manage_workers(worker))
-		goto recheck;
+	/* do we need to create worker? */
+	if (unlikely(!pool->nr_idle))
+		start_creater_work(pool);
 
 	/*
 	 * ->scheduled list can only be filled while a worker is
@@ -2139,8 +2107,8 @@ recheck:
 
 	/*
 	 * Finish PREP stage.  We're guaranteed to have at least one idle
-	 * worker or that someone else has already assumed the manager
-	 * role.  This is where @worker starts participating in concurrency
+	 * worker or the creater_work is issued.
+	 * This is where @worker starts participating in concurrency
 	 * management if applicable and concurrency management is restored
 	 * after being rebound.  See rebind_workers() for details.
 	 */
@@ -3354,11 +3322,13 @@ static int init_worker_pool(struct worker_pool *pool)
 
 	setup_timer(&pool->mayday_timer, pool_mayday_timeout,
 		    (unsigned long)pool);
+	setup_timer(&pool->cooldown_timer, pool_cooldown_timeout,
+		    (unsigned long)pool);
 
-	mutex_init(&pool->manager_arb);
 	mutex_init(&pool->attach_mutex);
 	INIT_LIST_HEAD(&pool->workers);
 
+	init_kthread_work(&pool->creater_work, pool_create_worker);
 	ida_init(&pool->worker_ida);
 	INIT_HLIST_NODE(&pool->hash_node);
 	pool->refcnt = 1;
@@ -3410,18 +3380,19 @@ static void put_unbound_pool(struct worker_pool *pool)
 		idr_remove(&worker_pool_idr, pool->id);
 	hash_del(&pool->hash_node);
 
-	/*
-	 * Become the manager and destroy all workers.  Grabbing
-	 * manager_arb prevents @pool's workers from blocking on
-	 * attach_mutex.
-	 */
-	mutex_lock(&pool->manager_arb);
+	/* wait for unfinished creating and shut down the associated timers */
+	flush_kthread_work(&pool->creater_work);
+	del_timer_sync(&pool->cooldown_timer);
+	del_timer_sync(&pool->mayday_timer);
 
+	/* all workers are anchored in idle_list, destroy them all at once */
 	spin_lock_irq(&pool->lock);
 	while ((worker = first_idle_worker(pool)))
 		destroy_worker(worker);
 	WARN_ON(pool->nr_workers || pool->nr_idle);
 	spin_unlock_irq(&pool->lock);
+
+	del_timer_sync(&pool->idle_timer);
 
 	mutex_lock(&pool->attach_mutex);
 	if (!list_empty(&pool->workers))
@@ -3430,12 +3401,6 @@ static void put_unbound_pool(struct worker_pool *pool)
 
 	if (pool->detach_completion)
 		wait_for_completion(pool->detach_completion);
-
-	mutex_unlock(&pool->manager_arb);
-
-	/* shut down the timers */
-	del_timer_sync(&pool->idle_timer);
-	del_timer_sync(&pool->mayday_timer);
 
 	/* sched-RCU protected to allow dereferences from get_work_pool() */
 	call_rcu_sched(&pool->rcu, rcu_free_pool);
@@ -4848,6 +4813,11 @@ static int __init init_workqueues(void)
 	hotcpu_notifier(workqueue_cpu_down_callback, CPU_PRI_WORKQUEUE_DOWN);
 
 	wq_numa_init();
+
+	kworker_creater_thread = kthread_run(kthread_worker_fn,
+					     &kworker_creater,
+					     "kworker/creater");
+	BUG_ON(!kworker_creater_thread);
 
 	/* initialize CPU pools */
 	for_each_possible_cpu(cpu) {
