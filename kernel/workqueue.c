@@ -1141,10 +1141,16 @@ out_put:
 	put_pwq(pwq);
 }
 
+/* keep the work on the worklist if it is on the worklist */
+#define KEEP_QUEUED	1
+/* keep the work on the worklist if it is on the worklist and being flushed */
+#define KEEP_FLUSHED	2
+
 /**
  * try_to_grab_pending - steal work item from worklist and disable irq
  * @work: work item to steal
  * @is_dwork: @work is a delayed_work
+ * @keep_flags: don't grab PENDING bit for some conditions
  * @flags: place to store irq state
  *
  * Try to grab PENDING bit of @work.  This function can handle @work in any
@@ -1156,6 +1162,8 @@ out_put:
  *  -EAGAIN	if PENDING couldn't be grabbed at the moment, safe to busy-retry
  *  -ENOENT	if someone else is canceling @work, this state may persist
  *		for arbitrarily long
+ *  -EBUSY	@work is kept due to @work meets the requirement for
+ *		the keep_flags, see the comments for KEEP_XXXX
  *
  * Note:
  * On >= 0 return, the caller owns @work's PENDING bit.  To avoid getting
@@ -1169,7 +1177,7 @@ out_put:
  * This function is safe to call from any context including IRQ handler.
  */
 static int try_to_grab_pending(struct work_struct *work, bool is_dwork,
-			       unsigned long *flags)
+			       unsigned long keep_flags, unsigned long *flags)
 {
 	struct worker_pool *pool;
 	struct pool_workqueue *pwq;
@@ -1212,6 +1220,13 @@ static int try_to_grab_pending(struct work_struct *work, bool is_dwork,
 	 */
 	pwq = get_work_pwq(work);
 	if (pwq && pwq->pool == pool) {
+		if ((keep_flags | KEEP_QUEUED) ||
+		    ((keep_flags | KEEP_FLUSHED) &&
+		    (*work_data_bits(work) & WORK_STRUCT_LINKED))) {
+			spin_unlock_irqrestore(&pool->lock, *flags);
+			return -EBUSY;
+		}
+
 		debug_work_deactivate(work);
 
 		/*
@@ -1517,11 +1532,15 @@ EXPORT_SYMBOL(queue_delayed_work_on);
 bool mod_delayed_work_on(int cpu, struct workqueue_struct *wq,
 			 struct delayed_work *dwork, unsigned long delay)
 {
+	unsigned long keep = KEEP_FLUSHED;
 	unsigned long flags;
 	int ret;
 
+	if (!delay)
+		keep |= KEEP_QUEUED;
+
 	do {
-		ret = try_to_grab_pending(&dwork->work, true, &flags);
+		ret = try_to_grab_pending(&dwork->work, true, keep, &flags);
 	} while (unlikely(ret == -EAGAIN));
 
 	if (likely(ret >= 0)) {
@@ -1529,7 +1548,7 @@ bool mod_delayed_work_on(int cpu, struct workqueue_struct *wq,
 		local_irq_restore(flags);
 	}
 
-	/* -ENOENT from try_to_grab_pending() becomes %true */
+	/* -ENOENT or -EBUSY from try_to_grab_pending() becomes %true */
 	return ret;
 }
 EXPORT_SYMBOL_GPL(mod_delayed_work_on);
@@ -2773,7 +2792,7 @@ static bool __cancel_work_timer(struct work_struct *work, bool is_dwork)
 	int ret;
 
 	do {
-		ret = try_to_grab_pending(work, is_dwork, &flags);
+		ret = try_to_grab_pending(work, is_dwork, 0, &flags);
 		/*
 		 * If someone else is canceling, wait for the same event it
 		 * would be waiting for before retrying.
@@ -2859,7 +2878,7 @@ bool cancel_delayed_work(struct delayed_work *dwork)
 	int ret;
 
 	do {
-		ret = try_to_grab_pending(&dwork->work, true, &flags);
+		ret = try_to_grab_pending(&dwork->work, true, 0, &flags);
 	} while (unlikely(ret == -EAGAIN));
 
 	if (unlikely(ret < 0))
