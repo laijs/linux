@@ -2047,11 +2047,8 @@ __acquires(&pool->lock)
 	if (unlikely(cpu_intensive))
 		worker_set_flags(worker, WORKER_CPU_INTENSIVE, true);
 
-	/*
-	 * Unbound pool isn't concurrency managed and work items should be
-	 * executed ASAP.  Wake up another worker if necessary.
-	 */
-	if ((worker->flags & WORKER_UNBOUND) && need_more_worker(pool))
+	/* Wake up another worker if necessary. */
+	if (need_more_worker(pool))
 		wake_up_worker(pool);
 
 	/*
