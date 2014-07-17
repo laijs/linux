@@ -3532,12 +3532,10 @@ static struct worker_pool *get_unbound_pool(const struct workqueue_attrs *attrs)
 
 	/* if cpumask is contained inside a NUMA node, we belong to that node */
 	if (wq_numa_enabled) {
-		for_each_node(node) {
-			if (cpumask_subset(pool->attrs->cpumask,
-					   wq_numa_possible_cpumask[node])) {
-				pool->node = node;
-				break;
-			}
+		node = cpu_to_node(cpumask_first(pool->attrs->cpumask));
+		if (cpumask_subset(pool->attrs->cpumask,
+				   wq_numa_possible_cpumask[node])) {
+			pool->node = node;
 		}
 	}
 
