@@ -105,6 +105,18 @@ ins_node:
 	plist_check_head(head);
 }
 
+static inline struct list_head *next_prio_head(struct plist_node *node)
+{
+	struct plist_node *next;
+
+	next = list_entry(node->prio_list.next, struct plist_node, prio_list);
+
+	if (next->prio > node->prio) /* return head of the next prio */
+		return &next->node_list;
+	else /* next is the first node of the plist, return head of the plist. */
+		return next->node_list.prev;
+}
+
 /**
  * plist_del - Remove a @node from plist.
  *
@@ -116,16 +128,9 @@ void plist_del(struct plist_node *node, struct plist_head *head)
 	plist_check_head(head);
 
 	if (!list_empty(&node->prio_list)) {
-		if (node->node_list.next != &head->node_list) {
-			struct plist_node *next;
-
-			next = list_entry(node->node_list.next,
-					struct plist_node, node_list);
-
-			/* add the next plist_node into prio_list */
-			if (list_empty(&next->prio_list))
-				list_add(&next->prio_list, &node->prio_list);
-		}
+		/* add the next plist_node into prio_list */
+		if (node->node_list.next != next_prio_head(node))
+			list_add(&plist_next(node)->prio_list, &node->prio_list);
 		list_del_init(&node->prio_list);
 	}
 
