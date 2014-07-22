@@ -3800,8 +3800,6 @@ int apply_workqueue_attrs(struct workqueue_struct *wq,
 		}
 	}
 
-	mutex_unlock(&wq_pool_mutex);
-
 	/* all pwqs have been created successfully, let's install'em */
 	mutex_lock(&wq->mutex);
 
@@ -3816,6 +3814,8 @@ int apply_workqueue_attrs(struct workqueue_struct *wq,
 	swap(wq->dfl_pwq, dfl_pwq);
 
 	mutex_unlock(&wq->mutex);
+
+	mutex_unlock(&wq_pool_mutex);
 
 	/* put the old pwqs */
 	for_each_node(node)
