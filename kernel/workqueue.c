@@ -3771,13 +3771,6 @@ int apply_workqueue_attrs(struct workqueue_struct *wq,
 	 */
 	copy_workqueue_attrs(tmp_attrs, new_attrs);
 
-	/*
-	 * CPUs should stay stable across pwq creations and installations.
-	 * Pin CPUs, determine the target cpumask for each node and create
-	 * pwqs accordingly.
-	 */
-	get_online_cpus();
-
 	mutex_lock(&wq_pool_mutex);
 
 	/*
@@ -3822,7 +3815,6 @@ int apply_workqueue_attrs(struct workqueue_struct *wq,
 		put_pwq_unlocked(pwq_tbl[node]);
 	put_pwq_unlocked(dfl_pwq);
 
-	put_online_cpus();
 	ret = 0;
 	/* fall through */
 out_free:
@@ -3837,7 +3829,6 @@ enomem_pwq:
 		if (pwq_tbl && pwq_tbl[node] != dfl_pwq)
 			free_unbound_pwq(pwq_tbl[node]);
 	mutex_unlock(&wq_pool_mutex);
-	put_online_cpus();
 enomem:
 	ret = -ENOMEM;
 	goto out_free;
@@ -3916,10 +3907,8 @@ static void wq_update_unbound_numa(struct workqueue_struct *wq, int cpu)
 	}
 
 	/*
-	 * Install the new pwq.  As this function is called only from CPU
-	 * hotplug callbacks and applying a new attrs is wrapped with
-	 * get/put_online_cpus(), @wq->unbound_attrs couldn't have changed
-	 * inbetween.
+	 * Install the new pwq.  As this function is called with wq_pool_mutex
+	 * held, @wq->unbound_attrs couldn't have changed inbetween.
 	 */
 	mutex_lock(&wq->mutex);
 	old_pwq = numa_pwq_tbl_install(wq, node, pwq);
