@@ -3795,7 +3795,7 @@ int apply_workqueue_attrs(struct workqueue_struct *wq,
 		goto enomem_pwq;
 
 	for_each_node(node) {
-		if (wq_calc_node_cpumask(attrs, node, -1, tmp_attrs->cpumask)) {
+		if (wq_calc_node_cpumask(new_attrs, node, -1, tmp_attrs->cpumask)) {
 			pwq_tbl[node] = alloc_unbound_pwq(wq, tmp_attrs);
 			if (!pwq_tbl[node])
 				goto enomem_pwq;
