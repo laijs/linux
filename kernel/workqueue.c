@@ -1214,9 +1214,20 @@ static int try_to_grab_pending(struct work_struct *work, bool is_dwork,
 		pwq_dec_nr_in_flight(pwq, get_work_color(work));
 
 		/* work->data points to pwq iff queued, point to pool */
-		set_work_pool_and_keep_pending(work, pool->id);
+		pool_id = NO_ID;
+		collision = find_collision_worker(pool, work);
+		if (collision) {
+			hash_del_init(&collision->collision_worker);
+			list_splice_init(&coolision->collision_scheduled,
+					 &pool->worklist);
+			pool_id = collision->pool->id;
+			/* TODO why can we safe to access the collision worker ? */
+			smp_store_release(collision->collision_pool, NULL);
+		}
+		set_work_pool_and_keep_pending(work, pool_id);
 
 		spin_unlock(&pool->lock);
+
 		return 1;
 	}
 	spin_unlock(&pool->lock);
@@ -1283,6 +1294,7 @@ static void __queue_work(int cpu, struct workqueue_struct *wq,
 {
 	struct pool_workqueue *pwq;
 	struct worker_pool *last_pool;
+	struct worker *collision;
 	struct list_head *worklist;
 	unsigned int work_flags;
 	unsigned int req_cpu = cpu;
@@ -1317,21 +1329,28 @@ retry:
 	 * pool to guarantee non-reentrancy.
 	 */
 	last_pool = get_work_pool(work);
-	if (last_pool && last_pool != pwq->pool) {
-		struct worker *worker;
-
+	if (last_pool) {
 		spin_lock(&last_pool->lock);
 
-		worker = find_worker_executing_work(last_pool, work);
+		collision = find_worker_executing_work(last_pool, work);
 
-		if (worker && worker->current_pwq->wq == wq) {
-			pwq = worker->current_pwq;
-		} else {
-			/* meh... not running there, queue here */
+		if (collision && collision->current_pwq->wq != wq)
+			collision = NULL;
+
+		if (collision) {
+			/* all collision fields should be in intial state */
+			if (WARN_ON(collision->collision_pool))
+				collision = NULL;
+			else
+				collision->collision_pool = pwq->pool;
+		}
+
+		if (last_pool != pwq->pool) {
 			spin_unlock(&last_pool->lock);
 			spin_lock(&pwq->pool->lock);
 		}
 	} else {
+		collision = NULL;
 		spin_lock(&pwq->pool->lock);
 	}
 
@@ -1345,6 +1364,8 @@ retry:
 	 */
 	if (unlikely(!pwq->refcnt)) {
 		if (wq->flags & WQ_UNBOUND) {
+			if (collision)
+				collision->collision_pool = NULL;
 			spin_unlock(&pwq->pool->lock);
 			cpu_relax();
 			goto retry;
@@ -1358,9 +1379,14 @@ retry:
 	trace_workqueue_queue_work(req_cpu, pwq, work);
 
 	if (WARN_ON(!list_empty(&work->entry))) {
+		if (collision)
+			collision->collision_pool = NULL;
 		spin_unlock(&pwq->pool->lock);
 		return;
 	}
+
+	if (collision)
+		hlist_add(collision->collision_worker, pwq->pool->collisions);
 
 	pwq->nr_in_flight[pwq->work_color]++;
 	work_flags = work_color_to_flags(pwq->work_color);
@@ -1927,6 +1953,52 @@ static bool manage_workers(struct worker *worker)
 	return ret;
 }
 
+static void clear_collision_and_lock(struct worker *worker)
+{
+	bool wakeup;
+
+	local_irq_disable();
+clear_collision:
+	collision_pool = ACCESS_ONE(worker->collision_pool);
+	if (collision_pool) {
+		spin_lock(&collision_pool->lock);
+		if (worker->collision_pool != collision_pool) {
+			spin_unlock(&collision_pool->lock);
+			goto clear_collision;
+		}
+
+		if (hash_empty(&worker->collision_hentry)) {
+			spin_unlock(&collision_pool->lock);
+			cpu_relax();
+			goto clear_collision;
+		}
+
+		hash_del(&worker->collision_hentry);
+		wakeup = !list_empty(&worker->collision_scheduled) &&
+			 list_empty(&collision_pool->worklist);
+		list_splice_init(&worker->collision_scheduled,
+				 &collision_pool->worklist);
+		worker->collision_pool = NULL;
+
+		if (collision_pool == pool)
+			return;
+
+		if (wakeup) {
+			smp_mb(); /* see insert_work() */
+			if (__need_more_worker(collision_pool))
+				wake_up_worker(collision_pool);
+		}
+
+		spin_unlock(&collision_pool->lock);
+	}
+
+	spin_lock(&pool->lock);
+	if (unlikely(smp_load_acquire(worker->collision_pool))) {
+		spin_unlock(&pool->lock);
+		goto clear_collision;
+	}
+}
+
 /**
  * process_one_work - process single work
  * @worker: self
@@ -1971,9 +2043,9 @@ __acquires(&pool->lock)
 	 * already processing the work.  If so, defer the work to the
 	 * currently executing one.
 	 */
-	collision = find_worker_executing_work(pool, work);
+	collision = find_collision_worker(pool, work);
 	if (unlikely(collision)) {
-		move_linked_works(work, &collision->scheduled, NULL);
+		move_linked_works(work, &collision->collision_scheduled, NULL);
 		return;
 	}
 
@@ -2046,7 +2118,7 @@ __acquires(&pool->lock)
 	 */
 	cond_resched();
 
-	spin_lock_irq(&pool->lock);
+	clear_collision_and_lock(worker);
 
 	/* clear cpu intensive status */
 	if (unlikely(cpu_intensive))
@@ -4281,6 +4353,7 @@ EXPORT_SYMBOL_GPL(workqueue_congested);
 unsigned int work_busy(struct work_struct *work)
 {
 	struct worker_pool *pool;
+	struct pool_workqueue *pwq;
 	unsigned long flags;
 	unsigned int ret = 0;
 
@@ -4291,8 +4364,14 @@ unsigned int work_busy(struct work_struct *work)
 	pool = get_work_pool(work);
 	if (pool) {
 		spin_lock(&pool->lock);
-		if (find_worker_executing_work(pool, work))
-			ret |= WORK_BUSY_RUNNING;
+		pwq = get_work_pwq(work);
+		if (!pwq) {
+			if (find_worker_executing_work(pool, work))
+				ret |= WORK_BUSY_RUNNING;
+		} else if (pwq->pool == pool) {
+			if (find_collision_worker(pool, work))
+				ret |= WORK_BUSY_RUNNING;
+		}
 		spin_unlock(&pool->lock);
 	}
 	local_irq_restore(flags);
