@@ -735,23 +735,11 @@ static bool need_more_worker(struct worker_pool *pool)
 	return !list_empty(&pool->worklist) && __need_more_worker(pool);
 }
 
-/* Can I start working?  Called from busy but !running workers. */
-static bool may_start_working(struct worker_pool *pool)
-{
-	return pool->nr_idle;
-}
-
 /* Do I need to keep working?  Called from currently running workers. */
 static bool keep_working(struct worker_pool *pool)
 {
 	return !list_empty(&pool->worklist) &&
 		atomic_read(&pool->nr_running) <= 1;
-}
-
-/* Do we need a new worker?  Called from manager. */
-static bool need_to_create_worker(struct worker_pool *pool)
-{
-	return need_more_worker(pool) && !may_start_working(pool);
 }
 
 /* Do we have too many workers and should some go away? */
@@ -1815,19 +1803,20 @@ static void pool_mayday_timeout(unsigned long __pool)
 	spin_lock_irq(&wq_mayday_lock);		/* for wq->maydays */
 	spin_lock(&pool->lock);
 
-	if (need_to_create_worker(pool)) {
-		/*
-		 * We've been trying to create a new worker but
-		 * haven't been successful.  We might be hitting an
-		 * allocation deadlock.  Send distress signals to
-		 * rescuers.
-		 */
-		list_for_each_entry(work, &pool->worklist, entry)
-			send_mayday(work);
-	}
+	if (!pool->nr_idle) {
+		if (need_more_worker(pool)) {
+			/*
+			 * We've been trying to create a new worker but
+			 * haven't been successful.  We might be hitting an
+			 * allocation deadlock.  Send distress signals to
+			 * rescuers.
+			 */
+			list_for_each_entry(work, &pool->worklist, entry)
+				send_mayday(work);
+		}
 
-	if (!pool->nr_idle)
 		mod_timer(&pool->mayday_timer, jiffies + MAYDAY_INTERVAL);
+	}
 
 	spin_unlock(&pool->lock);
 	spin_unlock_irq(&wq_mayday_lock);
@@ -2097,7 +2086,7 @@ woke_up:
 		goto sleep;
 
 	/* do we need to create worker? */
-	if (unlikely(!may_start_working(pool)))
+	if (unlikely(!pool->nr_idle))
 		start_creater_work(pool);
 
 	/*
