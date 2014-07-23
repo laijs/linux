@@ -1708,8 +1708,13 @@ static struct worker *create_worker(struct worker_pool *pool)
 	/* start the newly created worker */
 	spin_lock_irq(&pool->lock);
 	worker->pool->nr_workers++;
-	worker_enter_idle(worker);
+	/*
+	 * Wake up the worker at first and then queue it to the idle_list,
+	 * so that it is ensued that the wq_worker_sleeping() sees the worker
+	 * had been migrated properly when sees the worker in the idle_list.
+	 */
 	wake_up_process(worker->task);
+	worker_enter_idle(worker);
 	spin_unlock_irq(&pool->lock);
 
 	return worker;
