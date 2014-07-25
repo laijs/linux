@@ -129,6 +129,8 @@ int kthread_worker_fn(void *worker_ptr);
 bool queue_kthread_work(struct kthread_worker *worker,
 			struct kthread_work *work);
 void flush_kthread_work(struct kthread_work *work);
+void cancel_kthread_work(struct kthread_work *work);
+void cancel_kthread_work_sync(struct kthread_work *work);
 void flush_kthread_worker(struct kthread_worker *worker);
 
 #endif /* _LINUX_KTHREAD_H */
