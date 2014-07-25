@@ -622,6 +622,7 @@ EXPORT_SYMBOL_GPL(queue_kthread_work);
 
 struct kthread_flush_work {
 	struct kthread_work	work;
+	struct kthread_work	*cancel_work;
 	struct completion	done;
 };
 
@@ -629,23 +630,24 @@ static void kthread_flush_work_fn(struct kthread_work *work)
 {
 	struct kthread_flush_work *fwork =
 		container_of(work, struct kthread_flush_work, work);
+
+	/* cancel the possible requeued work for cancel_kthread_work_sync() */
+	if (fwork->cancel_work)
+		cancel_kthread_work(fwork->cancel_work);
 	complete(&fwork->done);
 }
 
-/**
- * flush_kthread_work - flush a kthread_work
- * @work: work to flush
- *
- * If @work is queued or executing, wait for it to finish execution.
- */
-void flush_kthread_work(struct kthread_work *work)
+static void __cancel_work_sync(struct kthread_work *work, bool cancel, bool sync)
 {
 	struct kthread_flush_work fwork = {
-		KTHREAD_WORK_INIT(fwork.work, kthread_flush_work_fn),
-		COMPLETION_INITIALIZER_ONSTACK(fwork.done),
+		.work = KTHREAD_WORK_INIT(fwork.work, kthread_flush_work_fn),
+		.done = COMPLETION_INITIALIZER_ONSTACK(fwork.done),
 	};
 	struct kthread_worker *worker;
 	bool noop = false;
+
+	if (WARN_ON(!cancel && !sync))
+		return;
 
 retry:
 	worker = work->worker;
@@ -658,19 +660,67 @@ retry:
 		goto retry;
 	}
 
-	if (!list_empty(&work->node))
+	/* cancel the queued work */
+	if (cancel && !list_empty(&work->node))
+		list_del_init(&work->node);
+
+	/* cancel the work during flushing it if it is requeued */
+	if (cancel && sync)
+		fwork.cancel_work = work;
+
+	/* insert the kthread_flush_work when sync */
+	if (sync && !list_empty(&work->node))
 		insert_kthread_work(worker, &fwork.work, work->node.next);
-	else if (worker->current_work == work)
+	else if (sync && worker->current_work == work)
 		insert_kthread_work(worker, &fwork.work, worker->work_list.next);
 	else
 		noop = true;
 
 	spin_unlock_irq(&worker->lock);
 
-	if (!noop)
+	if (sync && !noop)
 		wait_for_completion(&fwork.done);
 }
+
+/**
+ * flush_kthread_work - flush a kthread_work
+ * @work: work to flush
+ *
+ * If @work is queued or executing, wait for it to finish execution.
+ */
+void flush_kthread_work(struct kthread_work *work)
+{
+	__cancel_work_sync(work, false, true);
+}
 EXPORT_SYMBOL_GPL(flush_kthread_work);
+
+/**
+ * cancel_kthread_work - cancel a kthread_work
+ * @work: work to cancel
+ *
+ * If @work is queued, cancel it. Note, the work maybe still
+ * be executing after it returns.
+ */
+void cancel_kthread_work(struct kthread_work *work)
+{
+	__cancel_work_sync(work, true, false);
+}
+EXPORT_SYMBOL_GPL(cancel_kthread_work);
+
+/**
+ * cancel_kthread_work_sync - cancel a kthread_work and sync it
+ * @work: work to cancel
+ *
+ * If @work is queued or executing, cancel the queued work and
+ * wait for the executing work to finish execution. It ensures
+ * that there is at least one point that the work is not queued
+ * nor executing.
+ */
+void cancel_kthread_work_sync(struct kthread_work *work)
+{
+	__cancel_work_sync(work, true, true);
+}
+EXPORT_SYMBOL_GPL(cancel_kthread_work_sync);
 
 /**
  * flush_kthread_worker - flush all current works on a kthread_worker
@@ -682,8 +732,8 @@ EXPORT_SYMBOL_GPL(flush_kthread_work);
 void flush_kthread_worker(struct kthread_worker *worker)
 {
 	struct kthread_flush_work fwork = {
-		KTHREAD_WORK_INIT(fwork.work, kthread_flush_work_fn),
-		COMPLETION_INITIALIZER_ONSTACK(fwork.done),
+		.work = KTHREAD_WORK_INIT(fwork.work, kthread_flush_work_fn),
+		.done = COMPLETION_INITIALIZER_ONSTACK(fwork.done),
 	};
 
 	queue_kthread_work(worker, &fwork.work);
