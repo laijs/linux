@@ -252,7 +252,7 @@ struct workqueue_struct {
 	int			nr_drainers;	/* WQ: drain in progress */
 	int			saved_max_active; /* WQ: saved pwq max_active */
 
-	struct workqueue_attrs	*unbound_attrs;	/* WQ: only for unbound wqs */
+	struct workqueue_attrs	*unbound_attrs;	/* PW: only for unbound wqs */
 	struct pool_workqueue	*dfl_pwq;	/* PW: only for unbound wqs */
 
 #ifdef CONFIG_SYSFS
@@ -3880,7 +3880,8 @@ static void wq_update_unbound_numa(struct workqueue_struct *wq, int cpu)
 
 	lockdep_assert_held(&wq_pool_mutex);
 
-	if (!wq_numa_enabled || !(wq->flags & WQ_UNBOUND))
+	if (!wq_numa_enabled || !(wq->flags & WQ_UNBOUND) ||
+	    wq->unbound_attrs->no_numa)
 		return;
 
 	/*
@@ -3890,10 +3891,6 @@ static void wq_update_unbound_numa(struct workqueue_struct *wq, int cpu)
 	 */
 	target_attrs = wq_update_unbound_numa_attrs_buf;
 	cpumask = target_attrs->cpumask;
-
-	mutex_lock(&wq->mutex);
-	if (wq->unbound_attrs->no_numa)
-		goto out_unlock;
 
 	copy_workqueue_attrs(target_attrs, wq->unbound_attrs);
 	pwq = unbound_pwq_by_node(wq, node);
@@ -3906,19 +3903,16 @@ static void wq_update_unbound_numa(struct workqueue_struct *wq, int cpu)
 	 */
 	if (wq_calc_node_cpumask(wq->unbound_attrs, node, cpumask)) {
 		if (cpumask_equal(cpumask, pwq->pool->attrs->cpumask))
-			goto out_unlock;
+			return;
 	} else {
 		goto use_dfl_pwq;
 	}
-
-	mutex_unlock(&wq->mutex);
 
 	/* create a new pwq */
 	pwq = alloc_unbound_pwq(wq, target_attrs);
 	if (!pwq) {
 		pr_warn("workqueue: allocation failed while updating NUMA affinity of \"%s\"\n",
 			wq->name);
-		mutex_lock(&wq->mutex);
 		goto use_dfl_pwq;
 	}
 
@@ -3931,6 +3925,7 @@ static void wq_update_unbound_numa(struct workqueue_struct *wq, int cpu)
 	goto out_unlock;
 
 use_dfl_pwq:
+	mutex_lock(&wq->mutex);
 	spin_lock_irq(&wq->dfl_pwq->pool->lock);
 	get_pwq(wq->dfl_pwq);
 	spin_unlock_irq(&wq->dfl_pwq->pool->lock);
