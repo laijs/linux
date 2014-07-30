@@ -3652,8 +3652,15 @@ static void put_pwq_initial_ref(struct pool_workqueue *pwq)
 {
 	lockdep_assert_held(&wq_pool_mutex);
 
-	if (pwq && !--pwq->initial_refcnt)
-		put_pwq_unlocked(pwq);
+	if (pwq && !--pwq->initial_refcnt) {
+		if (list_empty(&pwq->pwqs_node)) {
+			/* if the pwq is not installed, release it directly */
+			put_unbound_pool(pwq->pool);
+			kmem_cache_free(pwq_cache, pwq);
+		} else {
+			put_pwq_unlocked(pwq);
+		}
+	}
 }
 
 /* sync @pwq with the current state of its associated wq and link it */
