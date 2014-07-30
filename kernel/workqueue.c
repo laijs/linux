@@ -201,6 +201,8 @@ struct pool_workqueue {
 	int			work_color;	/* L: current color */
 	int			flush_color;	/* L: flushing color */
 	int			refcnt;		/* L: reference count */
+	/* PL: reference count which owns the initial reference of the above refcnt */
+	int			initial_refcnt;
 	int			nr_in_flight[WORK_NR_COLORS];
 						/* L: nr of in_flight works */
 	int			nr_active;	/* L: nr of active works */
@@ -3623,10 +3625,35 @@ static void init_pwq(struct pool_workqueue *pwq, struct workqueue_struct *wq,
 	pwq->wq = wq;
 	pwq->flush_color = -1;
 	pwq->refcnt = 1;
+	pwq->initial_refcnt = 1;
 	INIT_LIST_HEAD(&pwq->delayed_works);
 	INIT_LIST_HEAD(&pwq->pwqs_node);
 	INIT_LIST_HEAD(&pwq->mayday_node);
 	INIT_WORK(&pwq->unbound_release_work, pwq_unbound_release_workfn);
+}
+
+/*
+ * get a reference to pwq->initial_refcnt, so the caller is one of the shared
+ * owners of the initial reference of the pwq->refcnt.
+ */
+static struct pool_workqueue *get_pwq_initial_ref(struct pool_workqueue *pwq)
+{
+	lockdep_assert_held(&wq_pool_mutex);
+	WARN_ON_ONCE(pwq->refcnt <= 1);
+	WARN_ON_ONCE(pwq->initial_refcnt <= 0);
+
+	pwq->initial_refcnt++;
+
+	/* return @pwq for helping chained sentence */
+	return pwq;
+}
+
+static void put_pwq_initial_ref(struct pool_workqueue *pwq)
+{
+	lockdep_assert_held(&wq_pool_mutex);
+
+	if (pwq && !--pwq->initial_refcnt)
+		put_pwq_unlocked(pwq);
 }
 
 /* sync @pwq with the current state of its associated wq and link it */
@@ -3804,8 +3831,7 @@ int apply_workqueue_attrs(struct workqueue_struct *wq,
 			if (!pwq_tbl[node])
 				goto enomem_pwq;
 		} else {
-			dfl_pwq->refcnt++;
-			pwq_tbl[node] = dfl_pwq;
+			pwq_tbl[node] = get_pwq_initial_ref(dfl_pwq);
 		}
 	}
 
@@ -3826,8 +3852,8 @@ int apply_workqueue_attrs(struct workqueue_struct *wq,
 
 	/* put the old pwqs */
 	for_each_node(node)
-		put_pwq_unlocked(pwq_tbl[node]);
-	put_pwq_unlocked(dfl_pwq);
+		put_pwq_initial_ref(pwq_tbl[node]);
+	put_pwq_initial_ref(dfl_pwq);
 
 	mutex_unlock(&wq_pool_mutex);
 
@@ -3874,7 +3900,7 @@ enomem:
 static void wq_update_unbound_numa(struct workqueue_struct *wq, int cpu)
 {
 	int node = cpu_to_node(cpu);
-	struct pool_workqueue *old_pwq = NULL, *pwq;
+	struct pool_workqueue *pwq;
 	struct workqueue_attrs *target_attrs;
 	cpumask_t *cpumask;
 
@@ -3905,7 +3931,8 @@ static void wq_update_unbound_numa(struct workqueue_struct *wq, int cpu)
 		if (cpumask_equal(cpumask, pwq->pool->attrs->cpumask))
 			return;
 	} else {
-		goto use_dfl_pwq;
+		pwq = get_pwq_initial_ref(wq->dfl_pwq);
+		goto install;
 	}
 
 	/* create a new pwq */
@@ -3913,26 +3940,17 @@ static void wq_update_unbound_numa(struct workqueue_struct *wq, int cpu)
 	if (!pwq) {
 		pr_warn("workqueue: allocation failed while updating NUMA affinity of \"%s\"\n",
 			wq->name);
-		goto use_dfl_pwq;
+		pwq = get_pwq_initial_ref(wq->dfl_pwq);
 	}
 
+install:
 	/*
 	 * Install the new pwq.  As this function is called with wq_pool_mutex
 	 * held, @wq->unbound_attrs couldn't have changed inbetween.
 	 */
 	mutex_lock(&wq->mutex);
-	old_pwq = numa_pwq_tbl_install(wq, node, pwq);
-	goto out_unlock;
-
-use_dfl_pwq:
-	mutex_lock(&wq->mutex);
-	spin_lock_irq(&wq->dfl_pwq->pool->lock);
-	get_pwq(wq->dfl_pwq);
-	spin_unlock_irq(&wq->dfl_pwq->pool->lock);
-	old_pwq = numa_pwq_tbl_install(wq, node, wq->dfl_pwq);
-out_unlock:
+	put_pwq_initial_ref(numa_pwq_tbl_install(wq, node, pwq));
 	mutex_unlock(&wq->mutex);
-	put_pwq_unlocked(old_pwq);
 }
 
 static int alloc_and_link_pwqs(struct workqueue_struct *wq)
@@ -4115,7 +4133,7 @@ void destroy_workqueue(struct workqueue_struct *wq)
 			}
 		}
 
-		if (WARN_ON((pwq != wq->dfl_pwq) && (pwq->refcnt > 1)) ||
+		if (WARN_ON(pwq->refcnt > 1) ||
 		    WARN_ON(pwq->nr_active) ||
 		    WARN_ON(!list_empty(&pwq->delayed_works))) {
 			mutex_unlock(&wq->mutex);
@@ -4157,7 +4175,7 @@ void destroy_workqueue(struct workqueue_struct *wq)
 		for_each_node(node) {
 			pwq = rcu_access_pointer(wq->numa_pwq_tbl[node]);
 			RCU_INIT_POINTER(wq->numa_pwq_tbl[node], NULL);
-			put_pwq_unlocked(pwq);
+			put_pwq_initial_ref(pwq);
 		}
 
 		/*
@@ -4166,7 +4184,7 @@ void destroy_workqueue(struct workqueue_struct *wq)
 		 */
 		pwq = wq->dfl_pwq;
 		wq->dfl_pwq = NULL;
-		put_pwq_unlocked(pwq);
+		put_pwq_initial_ref(pwq);
 		mutex_unlock(&wq_pool_mutex);
 	}
 }
