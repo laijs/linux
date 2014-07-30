@@ -3836,7 +3836,10 @@ int apply_workqueue_attrs(struct workqueue_struct *wq,
 	 * the default pwq covering whole @attrs->cpumask.  Always create
 	 * it even if we don't use it immediately.
 	 */
-	dfl_pwq = alloc_unbound_pwq(wq, new_attrs);
+	if (wq->dfl_pwq && wqattrs_equal(wq->dfl_pwq->pool->attrs, new_attrs))
+		dfl_pwq = get_pwq_initial_ref(wq->dfl_pwq);
+	else
+		dfl_pwq = alloc_unbound_pwq(wq, new_attrs);
 	if (!dfl_pwq)
 		goto out_put_pwq;
 
