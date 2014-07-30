@@ -3860,8 +3860,6 @@ int apply_workqueue_attrs(struct workqueue_struct *wq,
 	for_each_node(node)
 		pwq_tbl[node] = numa_pwq_tbl_install(wq, node, pwq_tbl[node]);
 
-	/* @dfl_pwq might not have been used, ensure it's linked */
-	link_pwq(dfl_pwq);
 	swap(wq->dfl_pwq, dfl_pwq);
 
 	mutex_unlock(&wq->mutex);
