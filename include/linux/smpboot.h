@@ -4,8 +4,6 @@
 #include <linux/types.h>
 
 struct task_struct;
-/* Cookie handed to the thread_fn*/
-struct smpboot_thread_data;
 
 /**
  * struct smp_hotplug_thread - CPU hotplug related thread descriptor
