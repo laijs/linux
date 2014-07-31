@@ -833,27 +833,24 @@ static DEFINE_PER_CPU(struct work_struct, lru_add_drain_work);
 void lru_add_drain_all(void)
 {
 	static DEFINE_MUTEX(lock);
-	static struct cpumask has_work;
 	int cpu;
 
 	mutex_lock(&lock);
 	get_online_cpus();
-	cpumask_clear(&has_work);
 
 	for_each_online_cpu(cpu) {
 		struct work_struct *work = &per_cpu(lru_add_drain_work, cpu);
 
+		INIT_WORK(work, lru_add_drain_per_cpu);
+
 		if (pagevec_count(&per_cpu(lru_add_pvec, cpu)) ||
 		    pagevec_count(&per_cpu(lru_rotate_pvecs, cpu)) ||
 		    pagevec_count(&per_cpu(lru_deactivate_pvecs, cpu)) ||
-		    need_activate_page_drain(cpu)) {
-			INIT_WORK(work, lru_add_drain_per_cpu);
+		    need_activate_page_drain(cpu))
 			schedule_work_on(cpu, work);
-			cpumask_set_cpu(cpu, &has_work);
-		}
 	}
 
-	for_each_cpu(cpu, &has_work)
+	for_each_online_cpu(cpu)
 		flush_work(&per_cpu(lru_add_drain_work, cpu));
 
 	put_online_cpus();
