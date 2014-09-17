@@ -224,6 +224,7 @@ ____rb_erase_color(struct rb_node *parent, struct rb_root *root,
 				 *      / \         / \
 				 *     Sl  Sr      N   Sl
 				 */
+				RCU_RB_CLONE(root, sibling);
 				parent->rb_right = tmp1 = sibling->rb_left;
 				sibling->rb_left = parent;
 				rb_set_parent_color(tmp1, parent, RB_BLACK);
@@ -275,6 +276,8 @@ ____rb_erase_color(struct rb_node *parent, struct rb_root *root,
 				 *                       \
 				 *                        Sr
 				 */
+				RCU_RB_CLONE(root, sibling);
+				RCU_RB_CLONE(root, sibling->rb_left);
 				sibling->rb_left = tmp1 = tmp2->rb_right;
 				tmp2->rb_right = sibling;
 				parent->rb_right = tmp2;
@@ -297,6 +300,8 @@ ____rb_erase_color(struct rb_node *parent, struct rb_root *root,
 			 *        / \         / \
 			 *      (sl) sr      N  (sl)
 			 */
+			if (tmp1 != sibling) /* if it is not cloned in case3 */
+				RCU_RB_CLONE(root, sibling);
 			parent->rb_right = tmp2 = sibling->rb_left;
 			sibling->rb_left = parent;
 			rb_set_parent_color(tmp1, sibling, RB_BLACK);
@@ -310,6 +315,7 @@ ____rb_erase_color(struct rb_node *parent, struct rb_root *root,
 			sibling = parent->rb_left;
 			if (rb_is_red(sibling)) {
 				/* Case 1 - right rotate at parent */
+				RCU_RB_CLONE(root, sibling);
 				parent->rb_left = tmp1 = sibling->rb_right;
 				sibling->rb_right = parent;
 				rb_set_parent_color(tmp1, parent, RB_BLACK);
@@ -336,6 +342,8 @@ ____rb_erase_color(struct rb_node *parent, struct rb_root *root,
 					break;
 				}
 				/* Case 3 - right rotate at sibling */
+				RCU_RB_CLONE(root, sibling);
+				RCU_RB_CLONE(root, sibling->rb_right);
 				sibling->rb_right = tmp1 = tmp2->rb_left;
 				tmp2->rb_left = sibling;
 				parent->rb_left = tmp2;
@@ -347,6 +355,8 @@ ____rb_erase_color(struct rb_node *parent, struct rb_root *root,
 				sibling = tmp2;
 			}
 			/* Case 4 - left rotate at parent + color flips */
+			if (tmp1 != sibling) /* if it is not cloned in case3 */
+				RCU_RB_CLONE(root, sibling);
 			parent->rb_left = tmp2 = sibling->rb_right;
 			sibling->rb_right = parent;
 			rb_set_parent_color(tmp1, sibling, RB_BLACK);
@@ -382,6 +392,11 @@ static inline void dummy_rotate(struct rb_node *old, struct rb_node *new) {}
 static const struct rb_augment_callbacks dummy_callbacks = {
 	dummy_propagate, dummy_copy, dummy_rotate
 };
+
+rcu_rb_tree_insert()
+{
+	
+}
 
 void rb_insert_color(struct rb_node *node, struct rb_root *root)
 {
