@@ -266,7 +266,7 @@ struct workqueue_struct {
 static struct kmem_cache *pwq_cache;
 
 static cpumask_var_t *wq_numa_possible_cpumask;
-					/* possible CPUs of each node */
+					/* PL: possible CPUs of each node */
 
 static bool wq_disable_numa;
 module_param_named(disable_numa, wq_disable_numa, bool, 0444);
@@ -3949,6 +3949,44 @@ out_unlock:
 	put_pwq_unlocked(old_pwq);
 }
 
+static void wq_update_numa_mapping(int cpu)
+{
+	int node, orig_node = NUMA_NO_NODE, new_node = cpu_to_node(cpu);
+
+	lockdep_assert_held(&wq_pool_mutex);
+
+	if (!wq_numa_enabled)
+		return;
+
+	/* the node of onlining CPU is not NUMA_NO_NODE */
+	if (WARN_ON(new_node == NUMA_NO_NODE))
+		return;
+
+	/* test whether the NUMA node mapping is changed. */
+	if (cpumask_test_cpu(cpu, wq_numa_possible_cpumask[new_node]))
+		return;
+
+	/* find the origin node */
+	for_each_node(node) {
+		if (cpumask_test_cpu(cpu, wq_numa_possible_cpumask[node])) {
+			orig_node = node;
+			break;
+		}
+	}
+
+	/* there may be multi mappings changed, re-initial. */
+	cpumask_clear(wq_numa_possible_cpumask[new_node]);
+	if (orig_node != NUMA_NO_NODE)
+		cpumask_clear(wq_numa_possible_cpumask[orig_node]);
+	for_each_possible_cpu(cpu) {
+		node = cpu_to_node(node);
+		if (node == new_node)
+			cpumask_set_cpu(cpu, wq_numa_possible_cpumask[new_node]);
+		else if (orig_node != NUMA_NO_NODE && node == orig_node)
+			cpumask_set_cpu(cpu, wq_numa_possible_cpumask[orig_node]);
+	}
+}
+
 static int alloc_and_link_pwqs(struct workqueue_struct *wq)
 {
 	bool highpri = wq->flags & WQ_HIGHPRI;
@@ -4583,6 +4621,8 @@ static int workqueue_cpu_up_callback(struct notifier_block *nfb,
 
 			mutex_unlock(&pool->attach_mutex);
 		}
+
+		wq_update_numa_mapping(cpu);
 
 		/* update NUMA affinity of unbound workqueues */
 		list_for_each_entry(wq, &workqueues, list)
