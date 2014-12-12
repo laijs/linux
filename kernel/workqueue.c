@@ -4811,6 +4811,9 @@ static void __init wq_numa_init(void)
 		if (WARN_ON(node == NUMA_NO_NODE)) {
 			pr_warn("workqueue: NUMA node mapping not available for cpu%d, disabling NUMA support\n", cpu);
 			/* happens iff arch is bonkers, let's just proceed */
+			for_each_node(node)
+				free_cpumask_var(tbl[node]);
+			kfree(tbl);
 			return;
 		}
 		cpumask_set_cpu(cpu, tbl[node]);
