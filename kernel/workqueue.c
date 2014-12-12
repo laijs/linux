@@ -4007,6 +4007,21 @@ static void wq_update_numa_mapping(int cpu)
 		if (pool->node != node)
 			pool->node = node;
 	}
+
+	/* Test whether we hit the case where orig_node is still online */
+	if (orig_node != NUMA_NO_NODE &&
+	    !cpumask_empty(cpumask_of_node(orig_node))) {
+		struct workqueue_struct *wq;
+		cpu = cpumask_any(cpumask_of_node(orig_node));
+
+		/*
+		 * the pwqs of the orig_node are still allowed on the onlining
+		 * CPU but which is belong to new_node, update NUMA affinity
+		 * for orig_node.
+		 */
+		list_for_each_entry(wq, &workqueues, list)
+			wq_update_unbound_numa(wq, cpu, true);
+	}
 }
 
 static int alloc_and_link_pwqs(struct workqueue_struct *wq)
