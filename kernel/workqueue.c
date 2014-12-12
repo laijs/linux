@@ -1673,13 +1673,16 @@ static struct worker *create_worker(struct worker_pool *pool)
 	struct worker *worker = NULL;
 	int id = -1;
 	char id_buf[16];
+	int node = pool->node;
 
 	/* ID is needed to determine kthread name */
 	id = ida_simple_get(&pool->worker_ida, 0, 0, GFP_KERNEL);
 	if (id < 0)
-		goto fail;
+		return NULL;
 
-	worker = alloc_worker(pool->node);
+again:
+	if (!worker)
+		worker = alloc_worker(node);
 	if (!worker)
 		goto fail;
 
@@ -1692,7 +1695,7 @@ static struct worker *create_worker(struct worker_pool *pool)
 	else
 		snprintf(id_buf, sizeof(id_buf), "u%d:%d", pool->id, id);
 
-	worker->task = kthread_create_on_node(worker_thread, worker, pool->node,
+	worker->task = kthread_create_on_node(worker_thread, worker, node,
 					      "kworker/%s", id_buf);
 	if (IS_ERR(worker->task))
 		goto fail;
@@ -1715,8 +1718,11 @@ static struct worker *create_worker(struct worker_pool *pool)
 	return worker;
 
 fail:
-	if (id >= 0)
-		ida_simple_remove(&pool->worker_ida, id);
+	if (node != NUMA_NO_NODE) {
+		node = NUMA_NO_NODE;
+		goto again;
+	}
+	ida_simple_remove(&pool->worker_ida, id);
 	kfree(worker);
 	return NULL;
 }
