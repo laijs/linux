@@ -3439,6 +3439,26 @@ static void put_unbound_pool(struct worker_pool *pool)
 	call_rcu_sched(&pool->rcu, rcu_free_pool);
 }
 
+static int calc_pool_node(struct worker_pool *pool)
+{
+	int node;
+
+	if (pool->cpu >= 0)
+		return cpu_to_node(pool->cpu);
+
+	/* if cpumask is contained inside a NUMA node, we belong to that node */
+	if (wq_numa_enabled) {
+		for_each_node(node) {
+			if (cpumask_subset(pool->attrs->cpumask,
+					   wq_numa_possible_cpumask[node])) {
+				return node;
+			}
+		}
+	}
+
+	return NUMA_NO_NODE;
+}
+
 /**
  * get_unbound_pool - get a worker_pool with the specified attributes
  * @attrs: the attributes of the worker_pool to get
@@ -3457,7 +3477,6 @@ static struct worker_pool *get_unbound_pool(const struct workqueue_attrs *attrs)
 {
 	u32 hash = wqattrs_hash(attrs);
 	struct worker_pool *pool;
-	int node;
 
 	lockdep_assert_held(&wq_pool_mutex);
 
@@ -3482,17 +3501,7 @@ static struct worker_pool *get_unbound_pool(const struct workqueue_attrs *attrs)
 	 * 'struct workqueue_attrs' comments for detail.
 	 */
 	pool->attrs->no_numa = false;
-
-	/* if cpumask is contained inside a NUMA node, we belong to that node */
-	if (wq_numa_enabled) {
-		for_each_node(node) {
-			if (cpumask_subset(pool->attrs->cpumask,
-					   wq_numa_possible_cpumask[node])) {
-				pool->node = node;
-				break;
-			}
-		}
-	}
+	pool->node = calc_pool_node(pool);
 
 	if (worker_pool_assign_id(pool) < 0)
 		goto fail;
@@ -3952,6 +3961,8 @@ out_unlock:
 static void wq_update_numa_mapping(int cpu)
 {
 	int node, orig_node = NUMA_NO_NODE, new_node = cpu_to_node(cpu);
+	struct worker_pool *pool;
+	int pi;
 
 	lockdep_assert_held(&wq_pool_mutex);
 
@@ -3984,6 +3995,17 @@ static void wq_update_numa_mapping(int cpu)
 			cpumask_set_cpu(cpu, wq_numa_possible_cpumask[new_node]);
 		else if (orig_node != NUMA_NO_NODE && node == orig_node)
 			cpumask_set_cpu(cpu, wq_numa_possible_cpumask[orig_node]);
+	}
+
+	/*
+	 * Fixup pool->node, it needs to test for all pools, pool->node might be
+	 * changed from orig_node to new_node or from new_node to NUMA_NO_NODE
+	 * or NUMA_NO_NODE to orig_node or some other possibilities.
+	 */
+	for_each_pool(pool, pi) {
+		node = calc_pool_node(pool);
+		if (pool->node != node)
+			pool->node = node;
 	}
 }
 
@@ -4614,10 +4636,13 @@ static int workqueue_cpu_up_callback(struct notifier_block *nfb,
 		for_each_pool(pool, pi) {
 			mutex_lock(&pool->attach_mutex);
 
-			if (pool->cpu == cpu)
+			if (pool->cpu == cpu) {
+				if (unlikely(pool->node != cpu_to_node(cpu)))
+					pool->node = cpu_to_node(cpu);
 				rebind_workers(pool);
-			else if (pool->cpu < 0)
+			} else if (pool->cpu < 0) {
 				restore_unbound_workers_cpumask(pool, cpu);
+			}
 
 			mutex_unlock(&pool->attach_mutex);
 		}
