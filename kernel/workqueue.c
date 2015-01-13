@@ -3950,6 +3950,7 @@ static void wq_update_unbound_numa(struct workqueue_struct *wq, int cpu,
 	 */
 	mutex_lock(&wq->mutex);
 	old_pwq = numa_pwq_tbl_install(wq, node, pwq);
+	put_pwq_unlocked(old_pwq);
 	goto out_unlock;
 
 use_dfl_pwq:
@@ -3957,9 +3958,9 @@ use_dfl_pwq:
 	get_pwq(wq->dfl_pwq);
 	spin_unlock_irq(&wq->dfl_pwq->pool->lock);
 	old_pwq = numa_pwq_tbl_install(wq, node, wq->dfl_pwq);
+	put_pwq_unlocked(old_pwq);
 out_unlock:
 	mutex_unlock(&wq->mutex);
-	put_pwq_unlocked(old_pwq);
 }
 
 static int alloc_and_link_pwqs(struct workqueue_struct *wq)
