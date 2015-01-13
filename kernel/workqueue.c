@@ -265,9 +265,6 @@ struct workqueue_struct {
 
 static struct kmem_cache *pwq_cache;
 
-static cpumask_var_t *wq_numa_possible_cpumask;
-					/* possible CPUs of each node */
-
 static bool wq_disable_numa;
 module_param_named(disable_numa, wq_disable_numa, bool, 0444);
 
@@ -3505,7 +3502,7 @@ static struct worker_pool *get_unbound_pool(const struct workqueue_attrs *attrs)
 	if (wq_numa_enabled) {
 		for_each_node(node) {
 			if (cpumask_subset(pool->attrs->cpumask,
-					   wq_numa_possible_cpumask[node])) {
+					   cpumask_of_node(node))) {
 				pool->node = node;
 				break;
 			}
@@ -3726,8 +3723,6 @@ static bool wq_calc_node_cpumask(const struct workqueue_attrs *attrs, int node,
 	if (cpumask_empty(cpumask))
 		goto use_dfl;
 
-	/* yeap, return possible CPUs in @node that @attrs wants */
-	cpumask_and(cpumask, attrs->cpumask, wq_numa_possible_cpumask[node]);
 	return !cpumask_equal(cpumask, attrs->cpumask);
 
 use_dfl:
@@ -4798,9 +4793,6 @@ out_unlock:
 
 static void __init wq_numa_init(void)
 {
-	cpumask_var_t *tbl;
-	int node, cpu;
-
 	if (num_possible_nodes() <= 1)
 		return;
 
@@ -4812,29 +4804,6 @@ static void __init wq_numa_init(void)
 	wq_update_unbound_numa_attrs_buf = alloc_workqueue_attrs(GFP_KERNEL);
 	BUG_ON(!wq_update_unbound_numa_attrs_buf);
 
-	/*
-	 * We want masks of possible CPUs of each node which isn't readily
-	 * available.  Build one from cpu_to_node() which should have been
-	 * fully initialized by now.
-	 */
-	tbl = kzalloc(nr_node_ids * sizeof(tbl[0]), GFP_KERNEL);
-	BUG_ON(!tbl);
-
-	for_each_node(node)
-		BUG_ON(!zalloc_cpumask_var_node(&tbl[node], GFP_KERNEL,
-				node_online(node) ? node : NUMA_NO_NODE));
-
-	for_each_possible_cpu(cpu) {
-		node = cpu_to_node(cpu);
-		if (WARN_ON(node == NUMA_NO_NODE)) {
-			pr_warn("workqueue: NUMA node mapping not available for cpu%d, disabling NUMA support\n", cpu);
-			/* happens iff arch is bonkers, let's just proceed */
-			return;
-		}
-		cpumask_set_cpu(cpu, tbl[node]);
-	}
-
-	wq_numa_possible_cpumask = tbl;
 	wq_numa_enabled = true;
 }
 
