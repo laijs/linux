@@ -168,6 +168,7 @@ struct worker_pool {
 	struct workqueue_attrs	*attrs;		/* I: worker attributes */
 	struct hlist_node	hash_node;	/* PL: unbound_pool_hash node */
 	int			refcnt;		/* PL: refcnt for unbound pools */
+	struct list_head	unbound_pwqs;	/* PL: list of pwq->unbound_pwq */
 
 	/*
 	 * The current concurrency level.  As it's likely to be accessed
@@ -201,6 +202,7 @@ struct pool_workqueue {
 	int			max_active;	/* L: max active works */
 	struct list_head	delayed_works;	/* L: delayed works */
 	struct list_head	pwqs_node;	/* WR: node on wq->pwqs */
+	struct list_head	unbound_pwq;	/* PL: node on pool->unbound_pwqs */
 	struct list_head	mayday_node;	/* MD: node on wq->maydays */
 
 	/*
@@ -3553,6 +3555,7 @@ static void pwq_unbound_release_workfn(struct work_struct *work)
 	mutex_unlock(&wq->mutex);
 
 	mutex_lock(&wq_pool_mutex);
+	list_del(&pwq->unbound_pwq);
 	put_unbound_pool(pool);
 	mutex_unlock(&wq_pool_mutex);
 
@@ -3673,6 +3676,7 @@ static struct pool_workqueue *alloc_unbound_pwq(struct workqueue_struct *wq,
 	}
 
 	init_pwq(pwq, wq, pool);
+	list_add(&pwq->unbound_pwq, &pool->unbound_pwqs);
 	return pwq;
 }
 
@@ -3682,6 +3686,7 @@ static void free_unbound_pwq(struct pool_workqueue *pwq)
 	lockdep_assert_held(&wq_pool_mutex);
 
 	if (pwq) {
+		list_del(&pwq->unbound_pwq);
 		put_unbound_pool(pwq->pool);
 		kmem_cache_free(pwq_cache, pwq);
 	}
@@ -3865,6 +3870,59 @@ enomem_pwq:
 enomem:
 	ret = -ENOMEM;
 	goto out_free;
+}
+
+/**
+ * pool_update_unbound_numa - update NUMA affinity of a pool for CPU hot[un]plug
+ * @pool: the target pool
+ * @cpu: the CPU coming up or going down
+ * @online: whether @cpu is coming up or going down
+ *
+ * This function is to be called from %CPU_DOWN_PREPARE, %CPU_ONLINE and
+ * %CPU_DOWN_FAILED.  @cpu is being hot[un]plugged, update NUMA affinity of
+ * @pool when allowed.
+ */
+static void pool_update_unbound_numa(struct worker_pool *pool, int cpu, bool online)
+{
+	u32 hash;
+	struct pool_workqueue *pwq;
+	struct worker *worker;
+
+	if (pool->cpu >= 0 || pool->node != cpu_to_node(cpu))
+		return; /* it must not be an unbound pool of the node */
+	if (online && cpumask_test_cpu(cpu, pool->attrs->cpumask))
+		return; /* it already has the online cpu */
+	if (!online && !cpumask_test_cpu(cpu, pool->attrs->cpumask))
+		return; /* it doesn't has the cpu to be removed */
+	if (!online && cpumask_weight(pool->attrs->cpumask) == 1)
+		return; /* the last cpu can't be removed from the pool */
+
+	/* It is called from CPU hot[un]plug, wq->unbound_attrs is stable */
+	list_for_each_entry(pwq, &pool->unbound_pwqs, unbound_pwq) {
+		if (wqattrs_equal(pool->attrs, pwq->wq->unbound_attrs))
+			return; /* the pool serves for at least a default pwq */
+		if (online && !cpumask_test_cpu(cpu, pwq->wq->unbound_attrs->cpumask))
+			return; /* this wq doesn't allow us to add the cpu */
+	}
+
+	/* OK, all pwqs allows us to update the pool directly, let's go */
+	if (online)
+		cpumask_set_cpu(cpu, pool->attrs->cpumask);
+	else
+		cpumask_clear_cpu(cpu, pool->attrs->cpumask);
+
+	/* rehash */
+	hash = wqattrs_hash(pool->attrs);
+	hash_del(&pool->hash_node);
+	hash_add(unbound_pool_hash, &pool->hash_node, hash);
+
+	/* update worker's cpumask */
+	mutex_lock(&pool->attach_mutex);
+	/* all cpus of the pool are online, the following shouldn't fail */
+	for_each_pool_worker(worker, pool)
+		WARN_ON_ONCE(set_cpus_allowed_ptr(worker->task,
+						  pool->attrs->cpumask) < 0);
+	mutex_unlock(&pool->attach_mutex);
 }
 
 /**
@@ -4596,6 +4654,8 @@ static int workqueue_cpu_up_callback(struct notifier_block *nfb,
 				restore_unbound_workers_cpumask(pool, cpu);
 
 			mutex_unlock(&pool->attach_mutex);
+
+			pool_update_unbound_numa(pool, cpu, true);
 		}
 
 		/* update NUMA affinity of unbound workqueues */
@@ -4619,6 +4679,8 @@ static int workqueue_cpu_down_callback(struct notifier_block *nfb,
 	int cpu = (unsigned long)hcpu;
 	struct work_struct unbind_work;
 	struct workqueue_struct *wq;
+	struct worker_pool *pool;
+	int pi;
 
 	switch (action & ~CPU_TASKS_FROZEN) {
 	case CPU_DOWN_PREPARE:
@@ -4626,10 +4688,16 @@ static int workqueue_cpu_down_callback(struct notifier_block *nfb,
 		INIT_WORK_ONSTACK(&unbind_work, wq_unbind_fn);
 		queue_work_on(cpu, system_highpri_wq, &unbind_work);
 
-		/* update NUMA affinity of unbound workqueues */
 		mutex_lock(&wq_pool_mutex);
+
+		/* try to update NUMA affinity of unbound pool */
+		for_each_pool(pool, pi)
+			pool_update_unbound_numa(pool, cpu, false);
+
+		/* update NUMA affinity of unbound workqueues */
 		list_for_each_entry(wq, &workqueues, list)
 			wq_update_unbound_numa(wq, cpu, false);
+
 		mutex_unlock(&wq_pool_mutex);
 
 		/* wait for per-cpu unbinding to finish */
