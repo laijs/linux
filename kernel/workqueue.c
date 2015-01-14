@@ -36,6 +36,7 @@
 #include <linux/notifier.h>
 #include <linux/kthread.h>
 #include <linux/hardirq.h>
+#include <linux/memory.h>
 #include <linux/mempolicy.h>
 #include <linux/freezer.h>
 #include <linux/kallsyms.h>
@@ -4573,6 +4574,7 @@ static int workqueue_cpu_up_callback(struct notifier_block *nfb,
 					       void *hcpu)
 {
 	int cpu = (unsigned long)hcpu;
+	int node = cpu_to_node(cpu);
 	struct worker_pool *pool;
 	struct workqueue_struct *wq;
 	int pi;
@@ -4580,6 +4582,7 @@ static int workqueue_cpu_up_callback(struct notifier_block *nfb,
 	switch (action & ~CPU_TASKS_FROZEN) {
 	case CPU_UP_PREPARE:
 		for_each_cpu_worker_pool(pool, cpu) {
+			pool->node = node;
 			if (pool->nr_workers)
 				continue;
 			if (!create_worker(pool))
@@ -4796,6 +4799,33 @@ out_unlock:
 }
 #endif /* CONFIG_FREEZER */
 
+static int wq_numa_callback(struct notifier_block *self,
+			    unsigned long action, void *arg)
+{
+	struct memory_notify *marg = arg;
+	int node = marg->status_change_nid_normal;
+	struct worker_pool *pool;
+	int pi;
+
+	switch (action) {
+	case MEM_GOING_ONLINE:
+		mutex_lock(&wq_pool_mutex);
+		for_each_pool(pool, pi) {
+			if (pool->node == node) {
+				pool->node = NUMA_NO_NODE;
+				if (pool->cpu < 0)
+					hash_del(&pool->hash_node);
+			}
+		}
+		mutex_unlock(&wq_pool_mutex);
+		break;
+	default:
+		break;
+	}
+
+	return 0;
+}
+
 static void __init wq_numa_init(void)
 {
 	cpumask_var_t *tbl;
@@ -4835,6 +4865,7 @@ static void __init wq_numa_init(void)
 	}
 
 	wq_numa_possible_cpumask = tbl;
+	hotplug_memory_notifier(wq_numa_callback, 0);
 	wq_numa_enabled = true;
 }
 
