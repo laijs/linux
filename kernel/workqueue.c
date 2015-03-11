@@ -3539,8 +3539,8 @@ static int wq_unbound_alloc_pwqs(struct wq_unbound_install_ctx *ctx)
 	 * it even if we don't use it immediately.
 	 * Try to reuse the old one at first.
 	 */
-	if (ctx->wq->dfl_pwq) {
-		if (wqattrs_equal(ctx->wq->dfl_pwq->pool->attrs, ctx->attrs))
+	if (ctx->wq->dfl_pwq &&
+	    wqattrs_equal(ctx->wq->dfl_pwq->pool->attrs, ctx->attrs)) {
 			ctx->dfl_pwq = get_pwq_initial_ref(ctx->wq->dfl_pwq);
 	} else {
 		ctx->dfl_pwq = alloc_unbound_pwq(ctx->wq, ctx->attrs);
