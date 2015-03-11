@@ -3809,6 +3809,98 @@ static struct pool_workqueue *numa_pwq_tbl_install(struct workqueue_struct *wq,
 	return old_pwq;
 }
 
+struct wq_unbound_install_ctx {
+	struct workqueue_struct	*wq;	/* target to be installed */
+	struct workqueue_attrs	*attrs;	/* attrs for installing */
+	struct pool_workqueue	*dfl_pwq;
+	struct pool_workqueue	*pwq_tbl[];
+};
+
+static struct wq_unbound_install_ctx *
+wq_unbound_alloc_install_ctx(struct workqueue_struct *wq,
+			     const struct workqueue_attrs *attrs)
+{
+	struct wq_unbound_install_ctx *ctx;
+	struct workqueue_attrs *new_attrs;
+
+	ctx = kzalloc(sizeof(*ctx) + nr_node_ids * sizeof(ctx->pwq_tbl[0]),
+		      GFP_KERNEL);
+
+	new_attrs = alloc_workqueue_attrs(GFP_KERNEL);
+	if (!ctx || !new_attrs) {
+		kfree(ctx);
+		kfree(new_attrs);
+		return NULL;
+	}
+
+	/* make a copy of @attrs and sanitize it */
+	copy_workqueue_attrs(new_attrs, attrs);
+	cpumask_and(new_attrs->cpumask, new_attrs->cpumask, cpu_possible_mask);
+
+	ctx->wq = wq;
+	ctx->attrs = new_attrs;
+	return ctx;
+}
+
+static int wq_unbound_alloc_pwqs(struct wq_unbound_install_ctx *ctx)
+{
+	int node;
+
+	lockdep_assert_held(&wq_pool_mutex);
+
+	/*
+	 * If something goes wrong during CPU up/down, we'll fall back to
+	 * the default pwq covering whole @attrs->cpumask.  Always create
+	 * it even if we don't use it immediately.
+	 */
+	ctx->dfl_pwq = alloc_unbound_pwq(ctx->wq, ctx->attrs);
+	if (!ctx->dfl_pwq)
+		return -ENOMEM;
+
+	for_each_node(node) {
+		ctx->pwq_tbl[node] = alloc_node_unbound_pwq(ctx->wq, ctx->attrs,
+							    node, -1);
+		if (!ctx->pwq_tbl[node])
+			return -ENOMEM;
+	}
+
+	return 0;
+}
+
+static void wq_unbound_install_pwqs(struct wq_unbound_install_ctx *ctx)
+{
+	int node;
+
+	lockdep_assert_held(&wq_pool_mutex);
+
+	mutex_lock(&ctx->wq->mutex);
+
+	copy_workqueue_attrs(ctx->wq->unbound_attrs, ctx->attrs);
+
+	/* save the previous pwq and install the new one */
+	for_each_node(node)
+		ctx->pwq_tbl[node] = numa_pwq_tbl_install(ctx->wq, node,
+							  ctx->pwq_tbl[node]);
+
+	swap(ctx->wq->dfl_pwq, ctx->dfl_pwq);
+
+	mutex_unlock(&ctx->wq->mutex);
+}
+
+static void wq_unbound_free_install_ctx(struct wq_unbound_install_ctx *ctx)
+{
+	int node;
+
+	lockdep_assert_held(&wq_pool_mutex);
+
+	for_each_node(node)
+		put_pwq_initial_ref(ctx->pwq_tbl[node]);
+	put_pwq_initial_ref(ctx->dfl_pwq);
+
+	free_workqueue_attrs(ctx->attrs);
+	kfree(ctx);
+}
+
 /**
  * apply_workqueue_attrs - apply new workqueue_attrs to an unbound workqueue
  * @wq: the target workqueue
@@ -3828,9 +3920,8 @@ static struct pool_workqueue *numa_pwq_tbl_install(struct workqueue_struct *wq,
 int apply_workqueue_attrs(struct workqueue_struct *wq,
 			  const struct workqueue_attrs *attrs)
 {
-	struct workqueue_attrs *new_attrs;
-	struct pool_workqueue **pwq_tbl, *dfl_pwq;
-	int node, ret = -ENOMEM;
+	struct wq_unbound_install_ctx *ctx;
+	int ret;
 
 	/* only unbound workqueues can change attributes */
 	if (WARN_ON(!(wq->flags & WQ_UNBOUND)))
@@ -3840,14 +3931,9 @@ int apply_workqueue_attrs(struct workqueue_struct *wq,
 	if (WARN_ON((wq->flags & __WQ_ORDERED) && !list_empty(&wq->pwqs)))
 		return -EINVAL;
 
-	pwq_tbl = kzalloc(nr_node_ids * sizeof(pwq_tbl[0]), GFP_KERNEL);
-	new_attrs = alloc_workqueue_attrs(GFP_KERNEL);
-	if (!pwq_tbl || !new_attrs)
-		goto out_free;
-
-	/* make a copy of @attrs and sanitize it */
-	copy_workqueue_attrs(new_attrs, attrs);
-	cpumask_and(new_attrs->cpumask, new_attrs->cpumask, cpu_possible_mask);
+	ctx = wq_unbound_alloc_install_ctx(wq, attrs);
+	if (!ctx)
+		return -ENOMEM;
 
 	/*
 	 * CPUs should stay stable across pwq creations and installations.
@@ -3857,48 +3943,13 @@ int apply_workqueue_attrs(struct workqueue_struct *wq,
 	get_online_cpus();
 
 	mutex_lock(&wq_pool_mutex);
-
-	/*
-	 * If something goes wrong during CPU up/down, we'll fall back to
-	 * the default pwq covering whole @attrs->cpumask.  Always create
-	 * it even if we don't use it immediately.
-	 */
-	dfl_pwq = alloc_unbound_pwq(wq, new_attrs);
-	if (!dfl_pwq)
-		goto out_put_pwq;
-
-	for_each_node(node) {
-		pwq_tbl[node] = alloc_node_unbound_pwq(wq, new_attrs, node, -1);
-		if (!pwq_tbl[node])
-			goto out_put_pwq;
-	}
-
-	/* all pwqs have been created successfully, let's install'em */
-	ret = 0;
-	mutex_lock(&wq->mutex);
-
-	copy_workqueue_attrs(wq->unbound_attrs, new_attrs);
-
-	/* save the previous pwq and install the new one */
-	for_each_node(node)
-		pwq_tbl[node] = numa_pwq_tbl_install(wq, node, pwq_tbl[node]);
-
-	swap(wq->dfl_pwq, dfl_pwq);
-
-	mutex_unlock(&wq->mutex);
-
-out_put_pwq:
-	/* put the old pwqs */
-	for_each_node(node)
-		put_pwq_initial_ref(pwq_tbl[node]);
-	put_pwq_initial_ref(dfl_pwq);
-
+	ret = wq_unbound_alloc_pwqs(ctx);
+	if (ret >= 0)
+		wq_unbound_install_pwqs(ctx);
+	wq_unbound_free_install_ctx(ctx);
 	mutex_unlock(&wq_pool_mutex);
 
 	put_online_cpus();
-out_free:
-	free_workqueue_attrs(new_attrs);
-	kfree(pwq_tbl);
 	return ret;
 }
 
