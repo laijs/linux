@@ -3852,10 +3852,16 @@ static int wq_unbound_alloc_pwqs(struct wq_unbound_install_ctx *ctx)
 	 * If something goes wrong during CPU up/down, we'll fall back to
 	 * the default pwq covering whole @attrs->cpumask.  Always create
 	 * it even if we don't use it immediately.
+	 * Try to reuse the old one at first.
 	 */
-	ctx->dfl_pwq = alloc_unbound_pwq(ctx->wq, ctx->attrs);
-	if (!ctx->dfl_pwq)
-		return -ENOMEM;
+	if (ctx->wq->dfl_pwq) {
+		if (wqattrs_equal(ctx->wq->dfl_pwq->pool->attrs, ctx->attrs))
+			ctx->dfl_pwq = get_pwq_initial_ref(ctx->wq->dfl_pwq);
+	} else {
+		ctx->dfl_pwq = alloc_unbound_pwq(ctx->wq, ctx->attrs);
+		if (!ctx->dfl_pwq)
+			return -ENOMEM;
+	}
 
 	for_each_node(node) {
 		ctx->pwq_tbl[node] = alloc_node_unbound_pwq(ctx->wq, ctx->attrs,
