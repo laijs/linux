@@ -299,7 +299,7 @@ static DEFINE_SPINLOCK(wq_mayday_lock);	/* protects wq->maydays list */
 static LIST_HEAD(workqueues);		/* PL: list of all workqueues */
 static bool workqueue_freezing;		/* PL: have wqs started freezing? */
 
-static cpumask_var_t wq_unbound_cpumask;
+static cpumask_var_t wq_unbound_cpumask; /* PL: low level cpumask for all unbound wqs */
 
 /* the per-cpu worker pools */
 static DEFINE_PER_CPU_SHARED_ALIGNED(struct worker_pool [NR_STD_WORKER_POOLS],
@@ -3496,42 +3496,60 @@ static struct pool_workqueue *numa_pwq_tbl_install(struct workqueue_struct *wq,
 
 struct wq_unbound_install_ctx {
 	struct workqueue_struct	*wq;	/* target to be installed */
+	struct workqueue_attrs	*user_attrs;	/* attrs set by user */
 	struct workqueue_attrs	*attrs;	/* attrs for installing */
+	struct list_head	list;	/* queued for batching install */
 	struct pool_workqueue	*dfl_pwq;
 	struct pool_workqueue	*pwq_tbl[];
 };
 
 static struct wq_unbound_install_ctx *
 wq_unbound_alloc_install_ctx(struct workqueue_struct *wq,
-			     const struct workqueue_attrs *attrs)
+			     const struct workqueue_attrs *attrs,
+			     cpumask_var_t unbound_cpumask)
 {
 	struct wq_unbound_install_ctx *ctx;
-	struct workqueue_attrs *new_attrs;
+	struct workqueue_attrs *user_attrs, *new_attrs;
 
 	ctx = kzalloc(sizeof(*ctx) + nr_node_ids * sizeof(ctx->pwq_tbl[0]),
 		      GFP_KERNEL);
 
 	new_attrs = alloc_workqueue_attrs(GFP_KERNEL);
-	if (!ctx || !new_attrs) {
+	user_attrs = alloc_workqueue_attrs(GFP_KERNEL);
+	if (!ctx || !user_attrs || !new_attr) {
 		kfree(ctx);
+		kfree(user_attrs);
 		kfree(new_attrs);
 		return NULL;
 	}
 
 	/* make a copy of @attrs and sanitize it */
+	copy_workqueue_attrs(user_attrs, attrs);
 	copy_workqueue_attrs(new_attrs, attrs);
-	cpumask_and(new_attrs->cpumask, new_attrs->cpumask, wq_unbound_cpumask);
+	cpumask_and(new_attrs->cpumask, user_attrs->cpumask, cpus_possible_cpumask);
+	cpumask_and(new_attrs->cpumask, new_attrs->cpumask, unbound_cpumask);
 
 	ctx->wq = wq;
+	ctx->user_attrs = user_attrs;
 	ctx->attrs = new_attrs;
 	return ctx;
 }
 
 static int wq_unbound_alloc_pwqs(struct wq_unbound_install_ctx *ctx)
 {
+	struct workqueue_attrs *dfl_attrs;
 	int node;
 
 	lockdep_assert_held(&wq_pool_mutex);
+
+	/*
+	 * If the cpumask set by the user doesn't everlap with the global
+	 * wq_unbound_cpumask, we ignore the wq_unbound_cpumask for this wq.
+	 */
+	if (cpumask_empty(ctx->attrs->cpumask))
+		dfl_attrs = ctx->user_attrs;
+	else
+		dfl_attrs = ctx->attrs;
 
 	/*
 	 * If something goes wrong during CPU up/down, we'll fall back to
@@ -3540,10 +3558,10 @@ static int wq_unbound_alloc_pwqs(struct wq_unbound_install_ctx *ctx)
 	 * Try to reuse the old one at first.
 	 */
 	if (ctx->wq->dfl_pwq &&
-	    wqattrs_equal(ctx->wq->dfl_pwq->pool->attrs, ctx->attrs)) {
+	    wqattrs_equal(ctx->wq->dfl_pwq->pool->attrs, dfl_attrs)) {
 			ctx->dfl_pwq = get_pwq_initial_ref(ctx->wq->dfl_pwq);
 	} else {
-		ctx->dfl_pwq = alloc_unbound_pwq(ctx->wq, ctx->attrs);
+		ctx->dfl_pwq = alloc_unbound_pwq(ctx->wq, dfl_attrs);
 		if (!ctx->dfl_pwq)
 			return -ENOMEM;
 	}
@@ -3566,7 +3584,7 @@ static void wq_unbound_install_pwqs(struct wq_unbound_install_ctx *ctx)
 
 	mutex_lock(&ctx->wq->mutex);
 
-	copy_workqueue_attrs(ctx->wq->unbound_attrs, ctx->attrs);
+	copy_workqueue_attrs(ctx->wq->unbound_attrs, ctx->user_attrs);
 
 	/* save the previous pwq and install the new one */
 	for_each_node(node)
@@ -3612,7 +3630,7 @@ int apply_workqueue_attrs(struct workqueue_struct *wq,
 			  const struct workqueue_attrs *attrs)
 {
 	struct wq_unbound_install_ctx *ctx;
-	int ret;
+	int ret = ENOMEM;
 
 	/* only unbound workqueues can change attributes */
 	if (WARN_ON(!(wq->flags & WQ_UNBOUND)))
@@ -3622,10 +3640,6 @@ int apply_workqueue_attrs(struct workqueue_struct *wq,
 	if (WARN_ON((wq->flags & __WQ_ORDERED) && !list_empty(&wq->pwqs)))
 		return -EINVAL;
 
-	ctx = wq_unbound_alloc_install_ctx(wq, attrs);
-	if (!ctx)
-		return -ENOMEM;
-
 	/*
 	 * CPUs should stay stable across pwq creations and installations.
 	 * Pin CPUs, determine the target cpumask for each node and create
@@ -3634,7 +3648,9 @@ int apply_workqueue_attrs(struct workqueue_struct *wq,
 	get_online_cpus();
 
 	mutex_lock(&wq_pool_mutex);
-	ret = wq_unbound_alloc_pwqs(ctx);
+	ctx = wq_unbound_alloc_install_ctx(wq, attrs, wq_unbound_cpumask);
+	if (ctx)
+		ret = wq_unbound_alloc_pwqs(ctx);
 	if (ret >= 0)
 		wq_unbound_install_pwqs(ctx);
 	wq_unbound_free_install_ctx(ctx);
@@ -3914,19 +3930,88 @@ static struct bus_type wq_subsys = {
 	.dev_groups			= wq_sysfs_groups,
 };
 
+static int unbounds_cpumask_apply(cpumask_var_t cpumask)
+{
+	LIST_HEAD(ctxs);
+	int ret = 0;
+	struct workqueue_struct *wq;
+	struct wq_unbound_install_ctx *ctx;
+
+	lockdep_assert_held(&wq_pool_mutex);
+
+	list_for_each_entry(wq, &workqueues, list) {
+		if (!(wq->flags & WQ_UNBOUND))
+			continue;
+		/* creating multiple pwqs breaks ordering guarantee */
+		if (WARN_ON(wq->flags & __WQ_ORDERED))
+			continue;
+
+		ctx = wq_unbound_alloc_install_ctx(wq, wq->unbound_attrs,
+						   cpumask);
+		if (!ctx) {
+			ret = -ENOMEM;
+			break;
+		}
+
+		ret = wq_unbound_alloc_pwqs(ctx);
+		if (ret < 0)
+			break;
+
+		list_add_tail(&ctx->list, &ctxs);
+	}
+
+	list_for_each_entry_safe(ctx, &ctxs, list) {
+		if (ret >= 0)
+			wq_unbound_install_pwqs(ctx);
+		wq_unbound_free_install_ctx(ctx);
+	}
+
+	return ret;
+}
+
+static ssize_t unbounds_cpumask_store(struct device *dev,
+				      struct device_attribute *attr,
+				      const char *buf, size_t count)
+{
+	cpumask_var_t cpumask;
+	int ret = -EINVAL;
+
+	if (!zalloc_cpumask_var(&cpumask, GFP_KERNEL))
+		return -ENOMEM;
+
+	ret = cpumask_parse(buf, cpumask);
+	if (ret)
+		goto out;
+
+	get_online_cpus();
+	if (cpumask_intersects(cpumask, cpu_online_mask)) {
+		mutex_lock(&wq_pool_mutex);
+		ret = unbounds_cpumask_apply(cpumask);
+		if (ret >= 0)
+			cpumask_copy(wq_unbound_cpumask, cpumask);
+		mutex_unlock(&wq_pool_mutex);
+	}
+	put_online_cpus();
+out:
+	free_cpumask_var(cpumask);
+	return ret ? ret : count;
+}
+
 static ssize_t unbounds_cpumask_show(struct device *dev,
 				     struct device_attribute *attr, char *buf)
 {
 	int written;
 
+	mutex_lock(&wq_pool_mutex);
 	written = scnprintf(buf, PAGE_SIZE, "%*pb\n",
 			    cpumask_pr_args(wq_unbound_cpumask));
+	mutex_unlock(&wq_pool_mutex);
 
 	return written;
 }
 
 static struct device_attribute wq_sysfs_cpumask_attr =
-	__ATTR(cpumask, 0444, unbounds_cpumask_show, NULL);
+	__ATTR(cpumask, 0444, unbounds_cpumask_show, unbounds_cpumask_store);
 
 static int __init wq_sysfs_init(void)
 {
