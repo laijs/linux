@@ -2071,10 +2071,12 @@ __acquires(&pool->lock)
 }
 
 /**
- * process_scheduled_works - process scheduled works
+ * process_top_works - process top works of a pwq
  * @worker: self
+ * @pwq: target pwq
  *
- * Process all scheduled works.  Please note that the scheduled list
+ * Move the first work and the linked works of the pwq to the scheduled list,
+ * and process all these scheduled works.  Please note that the scheduled list
  * may change while processing a work, so this function repeatedly
  * fetches a work from the top and executes it.
  *
@@ -2082,8 +2084,15 @@ __acquires(&pool->lock)
  * spin_lock_irq(pool->lock) which may be released and regrabbed
  * multiple times.
  */
-static void process_scheduled_works(struct worker *worker)
+static void process_top_works(struct worker *worker, struct pool_workqueue *pwq)
 {
+	struct work_struct *work = list_first_entry(&pwq->worklist,
+						    struct work_struct, entry);
+
+	move_linked_works(work, &worker->scheduled);
+	if (list_empty(&pwq->worklist))
+		list_del_init(&pwq->work_pwqnode);
+
 	while (!list_empty(&worker->scheduled)) {
 		struct work_struct *work = list_first_entry(&worker->scheduled,
 						struct work_struct, entry);
@@ -2109,15 +2118,7 @@ static void process_pwq_works(struct worker *worker, struct pool_workqueue *pwq)
 	int i;
 
 	for (i = 0; i < WORKS_PROCESS_BATCH; i++) {
-		struct work_struct *work =
-			list_first_entry(&pwq->worklist,
-					 struct work_struct, entry);
-
-		move_linked_works(work, &worker->scheduled);
-		if (list_empty(&pwq->worklist))
-			list_del_init(&pwq->work_pwqnode);
-
-		process_scheduled_works(worker);
+		process_top_works(worker, pwq);
 
 		if (!pwq_keep_working(pwq))
 			break;
@@ -2278,31 +2279,13 @@ repeat:
 		rescuer->pool = pool;
 
 		/*
-		 * Slurp in all works issued via this workqueue and
-		 * process'em.
+		 * process the pwq until the pool has running workers or
+		 * prepared idle workers for processing it.
 		 */
 		WARN_ON_ONCE(!list_empty(scheduled));
-		list_splice_init(&pwq->worklist, &rescuer->scheduled);
-
-		if (!list_empty(scheduled)) {
-			process_scheduled_works(rescuer);
-
-			/*
-			 * The above execution of rescued work items could
-			 * have created more to rescue through
-			 * pwq_activate_first_delayed() or chained
-			 * queueing.  Let's put @pwq back on mayday list so
-			 * that such back-to-back work items, which may be
-			 * being used to relieve memory pressure, don't
-			 * incur MAYDAY_INTERVAL delay inbetween.
-			 */
-			if (need_to_create_worker(pool)) {
-				spin_lock(&wq_mayday_lock);
-				get_pwq(pwq);
-				list_move_tail(&pwq->mayday_node, &wq->maydays);
-				spin_unlock(&wq_mayday_lock);
-			}
-		}
+		while (pwq_need_more_worker(pwq) &&
+		       (!!pool->manager + pool->nr_idle) < 2)
+			process_top_works(rescuer, pwq);
 
 		/*
 		 * Put the reference grabbed by send_mayday().  @pool won't
