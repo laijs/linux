@@ -108,15 +108,10 @@ enum {
 /*
  * A struct for workqueue attributes.  This can be used to change
  * attributes of an unbound workqueue.
- *
- * Unlike other fields, ->no_numa isn't a property of a worker_pool.  It
- * only modifies how apply_workqueue_attrs() select pools and thus doesn't
- * participate in pool hash calculations or equality comparisons.
  */
 struct workqueue_attrs {
 	int			nice;		/* nice level */
 	cpumask_var_t		cpumask;	/* allowed CPUs */
-	bool			no_numa;	/* disable NUMA affinity */
 };
 
 /*
@@ -267,8 +262,10 @@ struct workqueue_struct {
 	int			nr_drainers;	/* WQ: drain in progress */
 	int			saved_max_active; /* WQ: saved pwq max_active */
 
-	struct workqueue_attrs	*unbound_attrs;	/* PW: only for unbound wqs */
-	struct pool_workqueue	*dfl_pwq;	/* PW: only for unbound wqs */
+	/* The following fields are only for unbound wqs. */
+	struct workqueue_attrs	*unbound_attrs;	/* PW: configure attrs */
+	bool			numa;		/* PW: enable per-node pwqs */
+	struct pool_workqueue	*dfl_pwq;	/* PW: the default pwq */
 
 #ifdef CONFIG_SYSFS
 	struct wq_device	*wq_dev;	/* I: for sysfs interface */
@@ -3069,12 +3066,6 @@ static void copy_workqueue_attrs(struct workqueue_attrs *to,
 {
 	to->nice = from->nice;
 	cpumask_copy(to->cpumask, from->cpumask);
-	/*
-	 * Unlike hash and equality test, this function doesn't ignore
-	 * ->no_numa as it is used for both pool and wq attrs.  Instead,
-	 * get_unbound_pool() explicitly clears ->no_numa after copying.
-	 */
-	to->no_numa = from->no_numa;
 }
 
 /* hash value of the content of @attr */
@@ -3264,12 +3255,6 @@ static struct worker_pool *get_unbound_pool(const struct workqueue_attrs *attrs)
 
 	lockdep_set_subclass(&pool->lock, 1);	/* see put_pwq() */
 	copy_workqueue_attrs(pool->attrs, attrs);
-
-	/*
-	 * no_numa isn't a worker_pool attribute, always clear it.  See
-	 * 'struct workqueue_attrs' comments for detail.
-	 */
-	pool->attrs->no_numa = false;
 
 	/* if cpumask is contained inside a NUMA node, we belong to that node */
 	if (wq_numa_enabled) {
@@ -3491,8 +3476,8 @@ alloc_node_unbound_pwq(struct workqueue_struct *wq,
 	/*
 	 * We don't wanna alloc/free wq_attrs for each call.  Let's use a
 	 * preallocated one.  It is protected by wq_pool_mutex.
-	 * tmp_attrs->cpumask will be updated in next and tmp_attrs->no_numa
-	 * is not used, so we just need to initialize tmp_attrs->nice;
+	 * tmp_attrs->cpumask will be updated in next, so we just need
+	 * to initialize tmp_attrs->nice;
 	 */
 	tmp_attrs = wq_update_unbound_numa_attrs_buf;
 	tmp_attrs->nice = attrs->nice;
@@ -3552,6 +3537,7 @@ static struct pool_workqueue *numa_pwq_tbl_install(struct workqueue_struct *wq,
 struct apply_wqattrs_ctx {
 	struct workqueue_struct	*wq;		/* target workqueue */
 	struct workqueue_attrs	*attrs;		/* attrs to apply */
+	bool			numa;		/* enalbe per-node pwqs */
 	struct list_head	list;		/* queued for batching commit */
 	struct pool_workqueue	*dfl_pwq;
 	struct pool_workqueue	*pwq_tbl[];
@@ -3598,7 +3584,6 @@ apply_wqattrs_prepare(struct workqueue_struct *wq,
 	 */
 	cpumask_and(new_attrs->cpumask, cpumask, wq_unbound_cpumask);
 	new_attrs->nice = nice;
-	new_attrs->no_numa = !numa;
 	if (unlikely(cpumask_empty(new_attrs->cpumask)))
 		cpumask_copy(new_attrs->cpumask, wq_unbound_cpumask);
 
@@ -3622,6 +3607,7 @@ apply_wqattrs_prepare(struct workqueue_struct *wq,
 	/* save the user configured attrs and sanitize it. */
 	cpumask_and(new_attrs->cpumask, cpumask, cpu_possible_mask);
 	ctx->attrs = new_attrs;
+	ctx->numa = numa;
 
 	ctx->wq = wq;
 	return ctx;
@@ -3641,6 +3627,7 @@ static void apply_wqattrs_commit(struct apply_wqattrs_ctx *ctx)
 	mutex_lock(&ctx->wq->mutex);
 
 	copy_workqueue_attrs(ctx->wq->unbound_attrs, ctx->attrs);
+	ctx->wq->numa = ctx->numa;
 
 	/* save the previous pwq and install the new one */
 	for_each_node(node)
@@ -3760,8 +3747,7 @@ static void wq_update_unbound_numa(struct workqueue_struct *wq, int cpu,
 
 	lockdep_assert_held(&wq_pool_mutex);
 
-	if (!wq_numa_enabled || !(wq->flags & WQ_UNBOUND) ||
-	    wq->unbound_attrs->no_numa)
+	if (!wq_numa_enabled || !(wq->flags & WQ_UNBOUND) || !wq->numa)
 		return;
 
 	pwq = alloc_node_unbound_pwq(wq, wq->dfl_pwq, true, node, cpu_off,
@@ -4778,8 +4764,7 @@ static int workqueue_apply_unbound_cpumask(void)
 			continue;
 
 		ctx = apply_wqattrs_prepare(wq, wq->unbound_attrs->cpumask,
-					    wq->unbound_attrs->nice,
-					    !wq->unbound_attrs->no_numa);
+					    wq->unbound_attrs->nice, wq->numa);
 		if (!ctx) {
 			ret = -ENOMEM;
 			break;
@@ -4951,7 +4936,7 @@ static ssize_t wq_nice_store(struct device *dev, struct device_attribute *attr,
 
 	apply_wqattrs_lock();
 	ret = apply_workqueue_attrs_locked(wq, wq->unbound_attrs->cpumask,
-					   nice, !wq->unbound_attrs->no_numa);
+					   nice, wq->numa);
 	apply_wqattrs_unlock();
 
 	return ret ?: count;
@@ -4986,7 +4971,7 @@ static ssize_t wq_cpumask_store(struct device *dev,
 
 	apply_wqattrs_lock();
 	ret = apply_workqueue_attrs_locked(wq, cpumask, wq->unbound_attrs->nice,
-					   !wq->unbound_attrs->no_numa);
+					   wq->numa);
 	apply_wqattrs_unlock();
 
 	free_cpumask_var(cpumask);
@@ -5000,8 +4985,7 @@ static ssize_t wq_numa_show(struct device *dev, struct device_attribute *attr,
 	int written;
 
 	mutex_lock(&wq->mutex);
-	written = scnprintf(buf, PAGE_SIZE, "%d\n",
-			    !wq->unbound_attrs->no_numa);
+	written = scnprintf(buf, PAGE_SIZE, "%d\n", wq->numa);
 	mutex_unlock(&wq->mutex);
 
 	return written;
