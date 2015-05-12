@@ -295,7 +295,7 @@ module_param_named(power_efficient, wq_power_efficient, bool, 0444);
 
 static bool wq_numa_enabled;		/* unbound NUMA affinity enabled */
 
-/* buf for wq_update_unbound_numa_attrs(), protected by CPU hotplug exclusion */
+/* PL: buf for apply_wqattrs_prepare() and wq_update_unbound_numa() */
 static struct workqueue_attrs *wq_update_unbound_numa_attrs_buf;
 
 static DEFINE_MUTEX(wq_pool_mutex);	/* protects pools and workqueues list */
@@ -3561,9 +3561,14 @@ apply_wqattrs_prepare(struct workqueue_struct *wq,
 		      GFP_KERNEL);
 
 	new_attrs = alloc_workqueue_attrs(GFP_KERNEL);
-	tmp_attrs = alloc_workqueue_attrs(GFP_KERNEL);
-	if (!ctx || !new_attrs || !tmp_attrs)
+	if (!ctx || !new_attrs)
 		goto out_free;
+
+	/*
+	 * We don't need to alloc/free temporary attrs. Let's use a
+	 * preallocated one.  The following buf is protected by wq_pool_mutex.
+	 */
+	tmp_attrs = wq_update_unbound_numa_attrs_buf;
 
 	/*
 	 * Calculate the attrs of the default pwq.
@@ -3615,11 +3620,9 @@ apply_wqattrs_prepare(struct workqueue_struct *wq,
 	ctx->attrs = new_attrs;
 
 	ctx->wq = wq;
-	free_workqueue_attrs(tmp_attrs);
 	return ctx;
 
 out_free:
-	free_workqueue_attrs(tmp_attrs);
 	free_workqueue_attrs(new_attrs);
 	apply_wqattrs_cleanup(ctx);
 	return NULL;
@@ -3741,7 +3744,7 @@ static void wq_update_unbound_numa(struct workqueue_struct *wq, int cpu,
 	/*
 	 * We don't wanna alloc/free wq_attrs for each wq for each CPU.
 	 * Let's use a preallocated one.  The following buf is protected by
-	 * CPU hotplug exclusion.
+	 * wq_pool_mutex.
 	 */
 	target_attrs = wq_update_unbound_numa_attrs_buf;
 	cpumask = target_attrs->cpumask;
