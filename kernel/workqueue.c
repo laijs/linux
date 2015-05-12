@@ -3516,6 +3516,7 @@ apply_wqattrs_prepare(struct workqueue_struct *wq,
 {
 	struct apply_wqattrs_ctx *ctx;
 	struct workqueue_attrs *new_attrs, *tmp_attrs;
+	struct pool_workqueue *pwq;
 	int node;
 
 	lockdep_assert_held(&wq_pool_mutex);
@@ -3556,9 +3557,16 @@ apply_wqattrs_prepare(struct workqueue_struct *wq,
 
 	for_each_node(node) {
 		if (wq_calc_node_cpumask(new_attrs, node, -1, tmp_attrs->cpumask)) {
-			ctx->pwq_tbl[node] = alloc_unbound_pwq(wq, tmp_attrs);
-			if (!ctx->pwq_tbl[node])
-				goto out_free;
+			/* Try to reuse the current one */
+			pwq = unbound_pwq_by_node(wq, node);
+			if (pwq && wqattrs_equal(tmp_attrs, pwq->pool->attrs)) {
+				get_pwq_unlocked(pwq);
+			} else {
+				pwq = alloc_unbound_pwq(wq, tmp_attrs);
+				if (!pwq)
+					goto out_free;
+			}
+			ctx->pwq_tbl[node] = pwq;
 		} else {
 			ctx->dfl_pwq->refcnt++;
 			ctx->pwq_tbl[node] = ctx->dfl_pwq;
@@ -3717,7 +3725,6 @@ static void wq_update_unbound_numa(struct workqueue_struct *wq, int cpu,
 	cpumask = target_attrs->cpumask;
 
 	copy_workqueue_attrs(target_attrs, wq->unbound_attrs);
-	pwq = unbound_pwq_by_node(wq, node);
 
 	/*
 	 * Let's determine what needs to be done.  If the target cpumask is
@@ -3726,6 +3733,7 @@ static void wq_update_unbound_numa(struct workqueue_struct *wq, int cpu,
 	 * equals the default pwq's, the default pwq should be used.
 	 */
 	if (wq_calc_node_cpumask(wq->dfl_pwq->pool->attrs, node, cpu_off, cpumask)) {
+		pwq = unbound_pwq_by_node(wq, node);
 		if (cpumask_equal(cpumask, pwq->pool->attrs->cpumask))
 			return;
 	} else {
