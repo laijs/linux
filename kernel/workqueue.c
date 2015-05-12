@@ -3587,7 +3587,10 @@ apply_wqattrs_prepare(struct workqueue_struct *wq,
 	 * the default pwq covering whole @attrs->cpumask.  Always create
 	 * it even if we don't use it immediately.
 	 */
-	ctx->dfl_pwq = alloc_unbound_pwq(wq, new_attrs);
+	if (wq->dfl_pwq && wqattrs_equal(new_attrs, wq->dfl_pwq->pool->attrs))
+		ctx->dfl_pwq = get_pwq_unlocked(wq->dfl_pwq);
+	else
+		ctx->dfl_pwq = alloc_unbound_pwq(wq, new_attrs);
 	if (!ctx->dfl_pwq)
 		goto out_free;
 
@@ -3602,8 +3605,7 @@ apply_wqattrs_prepare(struct workqueue_struct *wq,
 				goto out_free;
 			ctx->pwq_tbl[node] = pwq;
 		} else {
-			ctx->dfl_pwq->refcnt++;
-			ctx->pwq_tbl[node] = ctx->dfl_pwq;
+			ctx->pwq_tbl[node] = get_pwq_unlocked(ctx->dfl_pwq);
 		}
 	}
 
