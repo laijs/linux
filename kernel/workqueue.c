@@ -3549,11 +3549,17 @@ apply_wqattrs_prepare(struct workqueue_struct *wq,
 	/*
 	 * If something goes wrong during CPU up/down, we'll fall back to
 	 * the default pwq covering whole @attrs->cpumask.  Always create
-	 * it even if we don't use it immediately.
+	 * it even if we don't use it immediately.  Check and reuse the
+	 * current default pwq if the @new_attrs equals the current one.
 	 */
-	ctx->dfl_pwq = alloc_unbound_pwq(wq, new_attrs);
-	if (!ctx->dfl_pwq)
-		goto out_free;
+	if (wq->dfl_pwq && wqattrs_equal(new_attrs, wq->dfl_pwq->pool->attrs)) {
+		get_pwq_unlocked(wq->dfl_pwq);
+		ctx->dfl_pwq = wq->dfl_pwq;
+	} else {
+		ctx->dfl_pwq = alloc_unbound_pwq(wq, new_attrs);
+		if (!ctx->dfl_pwq)
+			goto out_free;
+	}
 
 	for_each_node(node) {
 		if (wq_calc_node_cpumask(new_attrs, node, -1, tmp_attrs->cpumask)) {
@@ -3568,7 +3574,7 @@ apply_wqattrs_prepare(struct workqueue_struct *wq,
 			}
 			ctx->pwq_tbl[node] = pwq;
 		} else {
-			ctx->dfl_pwq->refcnt++;
+			get_pwq_unlocked(ctx->dfl_pwq);
 			ctx->pwq_tbl[node] = ctx->dfl_pwq;
 		}
 	}
