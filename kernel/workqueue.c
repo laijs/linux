@@ -1065,6 +1065,20 @@ static void put_pwq(struct pool_workqueue *pwq)
 }
 
 /**
+ * get_pwq_unlocked - get_pwq() with surrounding pool lock/unlock
+ * @pwq: pool_workqueue to get (should not %NULL)
+ *
+ * get_pwq() with locking.  The caller should have at least an owned
+ * reference on @pwq to match the guarantees required by get_pwq().
+ */
+static void get_pwq_unlocked(struct pool_workqueue *pwq)
+{
+	spin_lock_irq(&pwq->pool->lock);
+	get_pwq(pwq);
+	spin_unlock_irq(&pwq->pool->lock);
+}
+
+/**
  * put_pwq_unlocked - put_pwq() with surrounding pool lock/unlock
  * @pwq: pool_workqueue to put (can be %NULL)
  *
@@ -3715,7 +3729,9 @@ static void wq_update_unbound_numa(struct workqueue_struct *wq, int cpu,
 		if (cpumask_equal(cpumask, pwq->pool->attrs->cpumask))
 			return;
 	} else {
-		goto use_dfl_pwq;
+		pwq = wq->dfl_pwq;
+		get_pwq_unlocked(pwq);
+		goto install;
 	}
 
 	/* create a new pwq */
@@ -3723,21 +3739,14 @@ static void wq_update_unbound_numa(struct workqueue_struct *wq, int cpu,
 	if (!pwq) {
 		pr_warn("workqueue: allocation failed while updating NUMA affinity of \"%s\"\n",
 			wq->name);
-		goto use_dfl_pwq;
+		pwq = wq->dfl_pwq;
+		get_pwq_unlocked(pwq);
 	}
 
+install:
 	/* Install the new pwq. */
 	mutex_lock(&wq->mutex);
 	old_pwq = numa_pwq_tbl_install(wq, node, pwq);
-	goto out_unlock;
-
-use_dfl_pwq:
-	mutex_lock(&wq->mutex);
-	spin_lock_irq(&wq->dfl_pwq->pool->lock);
-	get_pwq(wq->dfl_pwq);
-	spin_unlock_irq(&wq->dfl_pwq->pool->lock);
-	old_pwq = numa_pwq_tbl_install(wq, node, wq->dfl_pwq);
-out_unlock:
 	mutex_unlock(&wq->mutex);
 	put_pwq_unlocked(old_pwq);
 }
