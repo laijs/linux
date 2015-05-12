@@ -295,8 +295,13 @@ module_param_named(power_efficient, wq_power_efficient, bool, 0444);
 
 static bool wq_numa_enabled;		/* unbound NUMA affinity enabled */
 
-/* buf for wq_update_unbound_numa_attrs(), protected by CPU hotplug exclusion */
-static struct workqueue_attrs *wq_update_unbound_numa_attrs_buf;
+/*
+ * PL: resulted attrs of wq_calc_node_cpumask() for apply_wqattrs_prepare()
+ * and wq_update_unbound_numa().
+ * We don't wanna alloc/free temporary attrs for each call. Let's preallocate
+ * one with the access protection of wq_pool_mutex.
+ */
+static struct workqueue_attrs *wq_calc_node_attrs_buf;
 
 static DEFINE_MUTEX(wq_pool_mutex);	/* protects pools and workqueues list */
 static DEFINE_SPINLOCK(wq_mayday_lock);	/* protects wq->maydays list */
@@ -3515,7 +3520,7 @@ apply_wqattrs_prepare(struct workqueue_struct *wq,
 		      const struct workqueue_attrs *attrs)
 {
 	struct apply_wqattrs_ctx *ctx;
-	struct workqueue_attrs *new_attrs, *tmp_attrs;
+	struct workqueue_attrs *new_attrs, *tmp_attrs = wq_calc_node_attrs_buf;
 	struct pool_workqueue *pwq;
 	int node;
 
@@ -3525,8 +3530,7 @@ apply_wqattrs_prepare(struct workqueue_struct *wq,
 		      GFP_KERNEL);
 
 	new_attrs = alloc_workqueue_attrs(GFP_KERNEL);
-	tmp_attrs = alloc_workqueue_attrs(GFP_KERNEL);
-	if (!ctx || !new_attrs || !tmp_attrs)
+	if (!ctx || !new_attrs)
 		goto out_free;
 
 	/*
@@ -3585,11 +3589,9 @@ apply_wqattrs_prepare(struct workqueue_struct *wq,
 	ctx->attrs = new_attrs;
 
 	ctx->wq = wq;
-	free_workqueue_attrs(tmp_attrs);
 	return ctx;
 
 out_free:
-	free_workqueue_attrs(tmp_attrs);
 	free_workqueue_attrs(new_attrs);
 	apply_wqattrs_cleanup(ctx);
 	return NULL;
@@ -3713,7 +3715,7 @@ static void wq_update_unbound_numa(struct workqueue_struct *wq, int cpu,
 	int node = cpu_to_node(cpu);
 	int cpu_off = online ? -1 : cpu;
 	struct pool_workqueue *old_pwq = NULL, *pwq;
-	struct workqueue_attrs *target_attrs;
+	struct workqueue_attrs *target_attrs = wq_calc_node_attrs_buf;
 	cpumask_t *cpumask;
 
 	lockdep_assert_held(&wq_pool_mutex);
@@ -3721,14 +3723,6 @@ static void wq_update_unbound_numa(struct workqueue_struct *wq, int cpu,
 	if (!wq_numa_enabled || !(wq->flags & WQ_UNBOUND) ||
 	    wq->unbound_attrs->no_numa)
 		return;
-
-	/*
-	 * We don't wanna alloc/free wq_attrs for each wq for each CPU.
-	 * Let's use a preallocated one.  The following buf is protected by
-	 * CPU hotplug exclusion.
-	 */
-	target_attrs = wq_update_unbound_numa_attrs_buf;
-	cpumask = target_attrs->cpumask;
 
 	copy_workqueue_attrs(target_attrs, wq->unbound_attrs);
 
@@ -3738,6 +3732,7 @@ static void wq_update_unbound_numa(struct workqueue_struct *wq, int cpu,
 	 * and create a new one if they don't match.  If the target cpumask
 	 * equals the default pwq's, the default pwq should be used.
 	 */
+	cpumask = target_attrs->cpumask;
 	if (wq_calc_node_cpumask(wq->dfl_pwq->pool->attrs, node, cpu_off, cpumask)) {
 		pwq = unbound_pwq_by_node(wq, node);
 		if (cpumask_equal(cpumask, pwq->pool->attrs->cpumask))
@@ -5208,8 +5203,8 @@ static void __init wq_numa_init(void)
 		return;
 	}
 
-	wq_update_unbound_numa_attrs_buf = alloc_workqueue_attrs(GFP_KERNEL);
-	BUG_ON(!wq_update_unbound_numa_attrs_buf);
+	wq_calc_node_attrs_buf = alloc_workqueue_attrs(GFP_KERNEL);
+	BUG_ON(!wq_calc_node_attrs_buf);
 
 	/*
 	 * We want masks of possible CPUs of each node which isn't readily
