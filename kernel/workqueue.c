@@ -295,7 +295,7 @@ module_param_named(power_efficient, wq_power_efficient, bool, 0444);
 
 static bool wq_numa_enabled;		/* unbound NUMA affinity enabled */
 
-/* PL: buf for apply_wqattrs_prepare() and wq_update_unbound_numa() */
+/* PL: buf for alloc_node_unbound_pwq() */
 static struct workqueue_attrs *wq_update_unbound_numa_attrs_buf;
 
 static DEFINE_MUTEX(wq_pool_mutex);	/* protects pools and workqueues list */
@@ -3458,32 +3458,45 @@ static struct pool_workqueue *alloc_unbound_pwq(struct workqueue_struct *wq,
 }
 
 /**
- * wq_calc_node_mask - calculate a wq_attrs' cpumask for the specified node
- * @attrs: the wq_attrs of the default pwq of the target workqueue
+ * get_node_unbound_pwq - get a pwq for the specified node
+ * @wq: the target workqueue
+ * @numa: NUMA affinity
  * @node: the target NUMA node
  * @cpu_going_down: if >= 0, the CPU to consider as offline
- * @cpumask: outarg, the resulting cpumask
+ * @dfl_pwq: the allocated default pwq
  *
- * Calculate the cpumask a workqueue with @attrs should use on @node.  If
- * @cpu_going_down is >= 0, that cpu is considered offline during
- * calculation.  The result is stored in @cpumask.
+ * Allocate or reuse a pwq with the cpumask that @wq should use on @node.
  *
- * If NUMA affinity is not enabled, @attrs->cpumask is always used.  If
- * enabled and @node has online CPUs requested by @attrs, the returned
- * cpumask is the intersection of the possible CPUs of @node and
- * @attrs->cpumask.
+ * If NUMA affinity is not enabled, @dfl_pwq is always used.  If
+ * enabled and @node has online CPUs requested by @dfl_pwq->pool->attrs,
+ * the cpumask is the intersection of the possible CPUs of @node and
+ * the cpumask of @dfl_pwq->pool->attrs.  If @cpu_going_down is >= 0,
+ * that cpu is considered offline during calculation.
  *
  * The caller is responsible for ensuring that the cpumask of @node stays
  * stable.
  *
- * Return: %true if the resulting @cpumask is different from @attrs->cpumask,
- * %false if equal.
+ * Return: valid pwq, it might be @dfl_pwq under some conditions
+ * 		or might be the current pwq of the @node.
+ * 	   NULL, when the allocation failed.
  */
-static bool wq_calc_node_cpumask(const struct workqueue_attrs *attrs, int node,
-				 int cpu_going_down, cpumask_t *cpumask)
+static struct pool_workqueue *
+get_node_unbound_pwq(struct workqueue_struct *wq, bool numa, int node,
+		     int cpu_going_down, struct pool_workqueue *dfl_pwq)
+
 {
-	if (!wq_numa_enabled || attrs->no_numa)
-		goto use_dfl;
+	struct pool_workqueue *pwq = unbound_pwq_by_node(wq, node);
+	const struct workqueue_attrs *attrs = dfl_pwq->pool->attrs;
+	struct workqueue_attrs *tmp_attrs = wq_update_unbound_numa_attrs_buf;
+	cpumask_t *cpumask;
+
+	lockdep_assert_held(&wq_pool_mutex);
+
+	if (!wq_numa_enabled || !numa)
+		return get_pwq_unlocked(dfl_pwq);
+
+	copy_workqueue_attrs(tmp_attrs, attrs);
+	cpumask = tmp_attrs->cpumask;
 
 	/* does @node have any online CPUs @attrs wants? */
 	cpumask_and(cpumask, cpumask_of_node(node), attrs->cpumask);
@@ -3491,15 +3504,18 @@ static bool wq_calc_node_cpumask(const struct workqueue_attrs *attrs, int node,
 		cpumask_clear_cpu(cpu_going_down, cpumask);
 
 	if (cpumask_empty(cpumask))
-		goto use_dfl;
+		return get_pwq_unlocked(dfl_pwq);
 
-	/* yeap, return possible CPUs in @node that @attrs wants */
+	/* yeap, use possible CPUs in @node that @attrs wants */
 	cpumask_and(cpumask, attrs->cpumask, wq_numa_possible_cpumask[node]);
-	return !cpumask_equal(cpumask, attrs->cpumask);
+	if (cpumask_equal(cpumask, attrs->cpumask))
+		return get_pwq_unlocked(dfl_pwq);
 
-use_dfl:
-	cpumask_copy(cpumask, attrs->cpumask);
-	return false;
+	/* try to reuse the current pwq */
+	if (pwq && wqattrs_equal(tmp_attrs, pwq->pool->attrs))
+		return get_pwq_unlocked(pwq);
+
+	return alloc_unbound_pwq(wq, tmp_attrs);
 }
 
 /* install @pwq into @wq's numa_pwq_tbl[] for @node and return the old pwq */
@@ -3551,7 +3567,7 @@ apply_wqattrs_prepare(struct workqueue_struct *wq,
 		      const struct workqueue_attrs *attrs)
 {
 	struct apply_wqattrs_ctx *ctx;
-	struct workqueue_attrs *new_attrs, *tmp_attrs;
+	struct workqueue_attrs *new_attrs;
 	struct pool_workqueue *pwq;
 	int node;
 
@@ -3565,12 +3581,6 @@ apply_wqattrs_prepare(struct workqueue_struct *wq,
 		goto out_free;
 
 	/*
-	 * We don't need to alloc/free temporary attrs. Let's use a
-	 * preallocated one.  The following buf is protected by wq_pool_mutex.
-	 */
-	tmp_attrs = wq_update_unbound_numa_attrs_buf;
-
-	/*
 	 * Calculate the attrs of the default pwq.
 	 * If the user configured cpumask doesn't overlap with the
 	 * wq_unbound_cpumask, we fallback to the wq_unbound_cpumask.
@@ -3579,13 +3589,6 @@ apply_wqattrs_prepare(struct workqueue_struct *wq,
 	cpumask_and(new_attrs->cpumask, new_attrs->cpumask, wq_unbound_cpumask);
 	if (unlikely(cpumask_empty(new_attrs->cpumask)))
 		cpumask_copy(new_attrs->cpumask, wq_unbound_cpumask);
-
-	/*
-	 * We may create multiple pwqs with differing cpumasks.  Make a
-	 * copy of @new_attrs which will be modified and used to obtain
-	 * pools.
-	 */
-	copy_workqueue_attrs(tmp_attrs, new_attrs);
 
 	/*
 	 * If something goes wrong during CPU up/down, we'll fall back to
@@ -3600,18 +3603,11 @@ apply_wqattrs_prepare(struct workqueue_struct *wq,
 		goto out_free;
 
 	for_each_node(node) {
-		if (wq_calc_node_cpumask(new_attrs, node, -1, tmp_attrs->cpumask)) {
-			pwq = unbound_pwq_by_node(wq, node);
-			if (pwq && wqattrs_equal(tmp_attrs, pwq->pool->attrs))
-				pwq = get_pwq_unlocked(pwq);
-			else
-				pwq = alloc_unbound_pwq(wq, tmp_attrs);
-			if (!pwq)
-				goto out_free;
-			ctx->pwq_tbl[node] = pwq;
-		} else {
-			ctx->pwq_tbl[node] = get_pwq_unlocked(ctx->dfl_pwq);
-		}
+		pwq = get_node_unbound_pwq(wq, !attrs->no_numa, node, -1,
+					   ctx->dfl_pwq);
+		if (!pwq)
+			goto out_free;
+		ctx->pwq_tbl[node] = pwq;
 	}
 
 	/* save the user configured attrs and sanitize it. */
@@ -3731,9 +3727,7 @@ static void wq_update_unbound_numa(struct workqueue_struct *wq, int cpu,
 {
 	int node = cpu_to_node(cpu);
 	int cpu_off = online ? -1 : cpu;
-	struct pool_workqueue *old_pwq = NULL, *pwq;
-	struct workqueue_attrs *target_attrs;
-	cpumask_t *cpumask;
+	struct pool_workqueue *old_pwq, *pwq;
 
 	lockdep_assert_held(&wq_pool_mutex);
 
@@ -3741,40 +3735,14 @@ static void wq_update_unbound_numa(struct workqueue_struct *wq, int cpu,
 	    wq->unbound_attrs->no_numa)
 		return;
 
-	/*
-	 * We don't wanna alloc/free wq_attrs for each wq for each CPU.
-	 * Let's use a preallocated one.  The following buf is protected by
-	 * wq_pool_mutex.
-	 */
-	target_attrs = wq_update_unbound_numa_attrs_buf;
-	cpumask = target_attrs->cpumask;
-
-	copy_workqueue_attrs(target_attrs, wq->unbound_attrs);
-
-	/*
-	 * Let's determine what needs to be done.  If the target cpumask is
-	 * different from the default pwq's, we need to compare it to @pwq's
-	 * and create a new one if they don't match.  If the target cpumask
-	 * equals the default pwq's, the default pwq should be used.
-	 */
-	if (wq_calc_node_cpumask(wq->dfl_pwq->pool->attrs, node, cpu_off, cpumask)) {
-		pwq = unbound_pwq_by_node(wq, node);
-		if (cpumask_equal(cpumask, pwq->pool->attrs->cpumask))
-			return;
-	} else {
-		pwq = get_pwq_unlocked(wq->dfl_pwq);
-		goto install;
-	}
-
 	/* create a new pwq */
-	pwq = alloc_unbound_pwq(wq, target_attrs);
+	pwq = get_node_unbound_pwq(wq, true, node, cpu_off, wq->dfl_pwq);
 	if (!pwq) {
 		pr_warn("workqueue: allocation failed while updating NUMA affinity of \"%s\"\n",
 			wq->name);
 		pwq = get_pwq_unlocked(wq->dfl_pwq);
 	}
 
-install:
 	/* Install the new pwq. */
 	mutex_lock(&wq->mutex);
 	old_pwq = numa_pwq_tbl_install(wq, node, pwq);
