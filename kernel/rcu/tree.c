@@ -496,8 +496,7 @@ EXPORT_SYMBOL_GPL(rcu_sched_force_quiescent_state);
 static int
 cpu_has_callbacks_ready_to_invoke(struct rcu_data *rdp)
 {
-	return &rdp->nxtlist != rdp->nxttail[RCU_DONE_TAIL] &&
-	       rdp->nxttail[RCU_DONE_TAIL] != NULL;
+	return !rcu_batch_empty(&rdp->cb_done);
 }
 
 /*
@@ -1331,13 +1330,13 @@ void rcu_cpu_stall_reset(void)
  */
 static void init_callback_list(struct rcu_data *rdp)
 {
-	int i;
-
 	if (init_nocb_callback_list(rdp))
 		return;
-	rdp->nxtlist = NULL;
-	for (i = 0; i < RCU_NEXT_SIZE; i++)
-		rdp->nxttail[i] = &rdp->nxtlist;
+
+	rcu_batch_init(&rdp->cb_next);
+	rcu_batch_init(&rdp->cb_ready);
+	rcu_batch_init(&rdp->cb_wait);
+	rcu_batch_init(&rdp->cb_done);
 }
 
 /*
@@ -1756,8 +1755,8 @@ static int rcu_gp_init(struct rcu_state *rsp)
 		rcu_preempt_check_blocked_tasks(rnp);
 		rnp->qsmask = rnp->qsmaskinit;
 		ACCESS_ONCE(rnp->gpnum) = rsp->gpnum;
-		WARN_ON_ONCE(rnp->completed != rsp->completed);
-		ACCESS_ONCE(rnp->completed) = rsp->completed;
+		if (WARN_ON_ONCE(rnp->completed != rsp->completed))
+			ACCESS_ONCE(rnp->completed) = rsp->completed;
 		if (rnp == rdp->mynode)
 			(void)__note_gp_changes(rsp, rnp, rdp);
 		rcu_preempt_boost_start_gp(rnp);
@@ -2222,13 +2221,11 @@ rcu_send_cbs_to_orphanage(int cpu, struct rcu_state *rsp,
 	 * because _rcu_barrier() excludes CPU-hotplug operations, so it
 	 * cannot be running now.  Thus no memory barrier is required.
 	 */
-	if (rdp->nxtlist != NULL) {
-		rsp->qlen_lazy += rdp->qlen_lazy;
-		rsp->qlen += rdp->qlen;
-		rdp->n_cbs_orphaned += rdp->qlen;
-		rdp->qlen_lazy = 0;
-		ACCESS_ONCE(rdp->qlen) = 0;
-	}
+	rsp->qlen_lazy += rdp->qlen_lazy;
+	rsp->qlen += rdp->qlen;
+	rdp->n_cbs_orphaned += rdp->qlen;
+	rdp->qlen_lazy = 0;
+	ACCESS_ONCE(rdp->qlen) = 0;
 
 	/*
 	 * Next, move those callbacks still needing a grace period to
@@ -2236,27 +2233,17 @@ rcu_send_cbs_to_orphanage(int cpu, struct rcu_state *rsp,
 	 * Some of the callbacks might have gone partway through a grace
 	 * period, but that is too bad.  They get to start over because we
 	 * cannot assume that grace periods are synchronized across CPUs.
-	 * We don't bother updating the ->nxttail[] array yet, instead
-	 * we just reset the whole thing later on.
 	 */
-	if (*rdp->nxttail[RCU_DONE_TAIL] != NULL) {
-		*rsp->orphan_nxttail = *rdp->nxttail[RCU_DONE_TAIL];
-		rsp->orphan_nxttail = rdp->nxttail[RCU_NEXT_TAIL];
-		*rdp->nxttail[RCU_DONE_TAIL] = NULL;
-	}
+	rcu_batch_move(&rsp->orphan_next, &rdp->cb_wait);
+	rcu_batch_move(&rsp->orphan_next, &rdp->cb_ready);
+	rcu_batch_move(&rsp->orphan_next, &rdp->cb_next);
 
 	/*
 	 * Then move the ready-to-invoke callbacks to the orphanage,
 	 * where some other CPU will pick them up.  These will not be
 	 * required to pass though another grace period: They are done.
 	 */
-	if (rdp->nxtlist != NULL) {
-		*rsp->orphan_donetail = rdp->nxtlist;
-		rsp->orphan_donetail = rdp->nxttail[RCU_DONE_TAIL];
-	}
-
-	/* Finally, initialize the rcu_data structure's list to empty.  */
-	init_callback_list(rdp);
+	rcu_batch_move(&rsp->orphan_done, &rdp->cb_done);
 }
 
 /*
@@ -2287,24 +2274,8 @@ static void rcu_adopt_orphan_cbs(struct rcu_state *rsp, unsigned long flags)
 	 * we are the task doing the rcu_barrier().
 	 */
 
-	/* First adopt the ready-to-invoke callbacks. */
-	if (rsp->orphan_donelist != NULL) {
-		*rsp->orphan_donetail = *rdp->nxttail[RCU_DONE_TAIL];
-		*rdp->nxttail[RCU_DONE_TAIL] = rsp->orphan_donelist;
-		for (i = RCU_NEXT_SIZE - 1; i >= RCU_DONE_TAIL; i--)
-			if (rdp->nxttail[i] == rdp->nxttail[RCU_DONE_TAIL])
-				rdp->nxttail[i] = rsp->orphan_donetail;
-		rsp->orphan_donelist = NULL;
-		rsp->orphan_donetail = &rsp->orphan_donelist;
-	}
-
-	/* And then adopt the callbacks that still need a grace period. */
-	if (rsp->orphan_nxtlist != NULL) {
-		*rdp->nxttail[RCU_NEXT_TAIL] = rsp->orphan_nxtlist;
-		rdp->nxttail[RCU_NEXT_TAIL] = rsp->orphan_nxttail;
-		rsp->orphan_nxtlist = NULL;
-		rsp->orphan_nxttail = &rsp->orphan_nxtlist;
-	}
+	rcu_batch_move(&rdp->cb_done, &rsp->orphan_done);
+	rcu_batch_move(&rdp->cb_next, &rsp->orphan_next);
 }
 
 /*
@@ -2394,12 +2365,9 @@ static void rcu_cleanup_dead_cpu(int cpu, struct rcu_state *rsp)
 	if (rnp->qsmaskinit == 0 && !rcu_preempt_has_tasks(rnp))
 		rcu_cleanup_dead_rnp(rnp);
 	rcu_report_qs_rnp(rdp->grpmask, rsp, rnp, flags); /* Rlses rnp->lock. */
-	WARN_ONCE(rdp->qlen != 0 || rdp->nxtlist != NULL,
-		  "rcu_cleanup_dead_cpu: Callbacks on offline CPU %d: qlen=%lu, nxtlist=%p\n",
-		  cpu, rdp->qlen, rdp->nxtlist);
-	init_callback_list(rdp);
-	/* Disallow further callbacks on this CPU. */
-	rdp->nxttail[RCU_NEXT_TAIL] = NULL;
+	WARN_ONCE(rdp->qlen != 0,
+		  "rcu_cleanup_dead_cpu: Callbacks on offline CPU %d: qlen=%lu\n",
+		  cpu, rdp->qlen);
 	mutex_unlock(&rsp->onoff_mutex);
 }
 
@@ -2426,6 +2394,7 @@ static void rcu_cleanup_dead_cpu(int cpu, struct rcu_state *rsp)
 static void rcu_do_batch(struct rcu_state *rsp, struct rcu_data *rdp)
 {
 	unsigned long flags;
+	struct rcu_batch invoke;
 	struct rcu_head *next, *list, **tail;
 	long bl, count, count_lazy;
 	int i;
@@ -2433,7 +2402,7 @@ static void rcu_do_batch(struct rcu_state *rsp, struct rcu_data *rdp)
 	/* If no callbacks are ready, just return. */
 	if (!cpu_has_callbacks_ready_to_invoke(rdp)) {
 		trace_rcu_batch_start(rsp->name, rdp->qlen_lazy, rdp->qlen, 0);
-		trace_rcu_batch_end(rsp->name, 0, !!ACCESS_ONCE(rdp->nxtlist),
+		trace_rcu_batch_end(rsp->name, 0, false,
 				    need_resched(), is_idle_task(current),
 				    rcu_is_callbacks_kthread());
 		return;
@@ -2447,24 +2416,18 @@ static void rcu_do_batch(struct rcu_state *rsp, struct rcu_data *rdp)
 	WARN_ON_ONCE(cpu_is_offline(smp_processor_id()));
 	bl = rdp->blimit;
 	trace_rcu_batch_start(rsp->name, rdp->qlen_lazy, rdp->qlen, bl);
-	list = rdp->nxtlist;
-	rdp->nxtlist = *rdp->nxttail[RCU_DONE_TAIL];
-	*rdp->nxttail[RCU_DONE_TAIL] = NULL;
-	tail = rdp->nxttail[RCU_DONE_TAIL];
-	for (i = RCU_NEXT_SIZE - 1; i >= 0; i--)
-		if (rdp->nxttail[i] == rdp->nxttail[RCU_DONE_TAIL])
-			rdp->nxttail[i] = &rdp->nxtlist;
+	rcu_batch_init(&invoke);
+	rcu_batch_move(&invoke, &rdp->cb_done);
 	local_irq_restore(flags);
 
 	/* Invoke callbacks. */
 	count = count_lazy = 0;
-	while (list) {
-		next = list->next;
-		prefetch(next);
+	while (!rcu_batch_empty(&invoke)) {
+		list = rcu_batch_dequeue(&invoke);
+		prefetch(invoke.head);
 		debug_rcu_head_unqueue(list);
 		if (__rcu_reclaim(rsp->name, list))
 			count_lazy++;
-		list = next;
 		/* Stop only if limit reached and CPU has something to do. */
 		if (++count >= bl &&
 		    (need_resched() ||
@@ -2473,20 +2436,13 @@ static void rcu_do_batch(struct rcu_state *rsp, struct rcu_data *rdp)
 	}
 
 	local_irq_save(flags);
-	trace_rcu_batch_end(rsp->name, count, !!list, need_resched(),
-			    is_idle_task(current),
+	trace_rcu_batch_end(rsp->name, count, !rcu_batch_empty(&invoke),
+			    need_resched(), is_idle_task(current),
 			    rcu_is_callbacks_kthread());
 
 	/* Update count, and requeue any remaining callbacks. */
-	if (list != NULL) {
-		*tail = rdp->nxtlist;
-		rdp->nxtlist = list;
-		for (i = 0; i < RCU_NEXT_SIZE; i++)
-			if (&rdp->nxtlist == rdp->nxttail[i])
-				rdp->nxttail[i] = tail;
-			else
-				break;
-	}
+	rcu_batch_move_head(&rdp->cb_done, &invoke);
+
 	smp_mb(); /* List handling before counting for rcu_barrier(). */
 	rdp->qlen_lazy -= count_lazy;
 	ACCESS_ONCE(rdp->qlen) = rdp->qlen - count;
@@ -2502,7 +2458,6 @@ static void rcu_do_batch(struct rcu_state *rsp, struct rcu_data *rdp)
 		rdp->n_force_qs_snap = rsp->n_force_qs;
 	} else if (rdp->qlen < rdp->qlen_last_fqs_check - qhimark)
 		rdp->qlen_last_fqs_check = rdp->qlen;
-	WARN_ON_ONCE((rdp->nxtlist == NULL) != (rdp->qlen == 0));
 
 	local_irq_restore(flags);
 
