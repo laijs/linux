@@ -14,6 +14,7 @@
 #include <linux/err.h>
 #include <linux/fs.h>
 
+//# "#!" 应该属于ABI，但是"#!"只出现在这里，没看到他出现在相关的ABI描述的文件上
 static int load_script(struct linux_binprm *bprm)
 {
 	const char *i_arg, *i_name;

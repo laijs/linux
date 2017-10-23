@@ -3,6 +3,17 @@
 #include <linux/task_work.h>
 #include <linux/tracehook.h>
 
+//# 注册，删除task_work. task_work 在task返回userspace,exit时被调用
+//# TODO 在 signal.c 也有两次调用 task_work_run 没理解， SIGSTOP 吗？
+//# kernel/irq/manage.c 用于处理irq线程因不合理的dirver代码而退出的情况
+//# kernel/sched/fair.c 将笨重代码从schedule() 那里挪出来
+//# uprobe 用于刚创建的新进程的即将回到user时候做相关初始化
+//# fs/namespace.c 用于delay mntput. 这个莫名其妙，跟userspace 又啥关系？
+//# fs/file_table.c 用于delay put. 这个莫名其妙，跟userspace 又啥关系？
+//# 应该是使用内核其它的delay 机制(比如workqueue)跟本task同步maf，这个刚好使用
+//# intel rdt, 移动cpu rdt。好理解
+//# security 2 处，不好理解
+
 static struct callback_head work_exited; /* all we need is ->next == NULL */
 
 /**

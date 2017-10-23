@@ -2154,12 +2154,14 @@ static int ptrace_signal(int signr, siginfo_t *info)
 	return signr;
 }
 
+//# TODO 这个函数具体干嘛的？
 int get_signal(struct ksignal *ksig)
 {
 	struct sighand_struct *sighand = current->sighand;
 	struct signal_struct *signal = current->signal;
 	int signr;
 
+	//# TODO 查看 7266702 来由
 	if (unlikely(current->task_works))
 		task_work_run();
 

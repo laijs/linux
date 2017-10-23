@@ -13,6 +13,8 @@
 #include <stub-data.h>
 #include <sysdep/stub.h>
 
+//# copy_context_skas0() (用于 guest userspace fork 时??)创建新的mm, 
+//# 会让guest目标进程调用stub_clone_handler() 来实现这件事。
 /*
  * This is in a separate file because it needs to be compiled with any
  * extraneous gcc flags (-pg, -fprofile-arcs, -ftest-coverage) disabled
