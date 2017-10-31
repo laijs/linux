@@ -14,11 +14,11 @@
 #include <skas.h>
 
 //# uml 启动流程 (main() -> start_kernel())
-//# main()          arch/um/os-Linux/main.c
-//# linux_main()    arch/um/kernel/um_arch.c
-//# start_uml()     arch/um/kernel/skas/process.c
-//# start_idle_thread() arch/um/os-Linux/skas/process.c
-//# uml_finishsetup()   arch/um/kernel/um_arch.c
+//# main()               arch/um/os-Linux/main.c
+//# linux_main()         arch/um/kernel/um_arch.c
+//# start_uml()          arch/um/kernel/skas/process.c
+//# start_idle_thread()  arch/um/os-Linux/skas/process.c
+//# uml_finishsetup()    arch/um/kernel/um_arch.c
 //# new_thread_handler() arch/um/kernel/process.c
 //# start_kernel_proc()  arch/um/kernel/skas/process.c
 //# start_kernel()
