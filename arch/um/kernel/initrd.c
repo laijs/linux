@@ -14,6 +14,8 @@
 static char *initrd __initdata = NULL;
 static int load_initrd(char *filename, void *buf, int size);
 
+//# 读取文件到bootmem，并设置initrd_start指到这里
+//# TODO, 内核启动时通过“rootfs_initcall(populate_rootfs);”使用initrd_start.
 int __init read_initrd(void)
 {
 	void *area;

@@ -19,6 +19,7 @@
 #include <skas.h>
 #include <os.h>
 
+//# fs/exec.c flush_old_exec() 调用de_thread() 杀死其他线程后并切换mm后调用这个.
 void flush_thread(void)
 {
 	void *data = NULL;

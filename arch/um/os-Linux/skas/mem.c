@@ -18,6 +18,9 @@
 #include <sysdep/ptrace.h>
 #include <sysdep/stub.h>
 
+//# batch_syscall_stub() 是 stub64.S 里面的函数，循环发起写在stack上的所有系统调用
+//# run_syscall_stub() 只是往stack填充syscall的信息，并没有实际调用，直到stack满，
+//# 或者最后一次调用的时候
 extern char batch_syscall_stub[], __syscall_stub_start[];
 
 extern void wait_stub_done(int pid);

@@ -12,6 +12,9 @@
 #include <linux/types.h>
 #include <linux/uaccess.h>
 
+//# 用户可以通过/proc/exitcode 来设置uml_exitcode
+//# 当uml 退出是，返回这个exitcode
+
 /*
  * If read and write race, the read will still atomically read a valid
  * value.

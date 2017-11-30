@@ -132,6 +132,11 @@ export LDS_START      := $(START)
 export LDS_ELF_ARCH   := $(ELF_ARCH)
 export LDS_ELF_FORMAT := $(ELF_FORMAT)
 
+# //# -Wl 为gcc的参数，作用是把,后面的参数传递到linker那里去
+# //# --wrap 是linker的参数,应用调用malloc()其实调用到__wrap_malloc()
+# //# 你只有实现__wrap_malloc()即可. 你也可以调用__real_malloc()
+# //# 调用原本的malloc().
+# //# 这里对应的__wrap_malloc()的代码在arch/um/os-Linux/main.c
 # The wrappers will select whether using "malloc" or the kernel allocator.
 LINK_WRAPS = -Wl,--wrap,malloc -Wl,--wrap,free -Wl,--wrap,calloc
 

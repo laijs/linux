@@ -3,11 +3,15 @@
 # arch/um: Generic definitions
 # ===========================================================================
 
+# //# 这里定义了USER_OBJS,包括
+# //# 1）在每个Makefile 中加到 USER_OBJS 的那些 .o
+# //# 2）_user.o 结尾的
 USER_SINGLE_OBJS := \
 	$(foreach f,$(patsubst %.o,%,$(obj-y) $(obj-m)),$($(f)-objs))
 USER_OBJS += $(filter %_user.o,$(obj-y) $(obj-m)  $(USER_SINGLE_OBJS))
 USER_OBJS := $(foreach file,$(USER_OBJS),$(obj)/$(file))
 
+# //# USER_OBJS 按如下方式定义c_flags
 $(USER_OBJS:.o=.%): \
 	c_flags = -Wp,-MD,$(depfile) $(USER_CFLAGS) -include $(srctree)/include/linux/kern_levels.h -include user.h $(CFLAGS_$(basetarget).o)
 

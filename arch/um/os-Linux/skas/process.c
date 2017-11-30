@@ -464,6 +464,8 @@ static int __init init_thread_regs(void)
 
 __initcall(init_thread_regs);
 
+//# 这里创建进程来模拟内存mm，但是进程是从@pid这里clone过来的，
+//# 原来的进程的map再哪里清理掉呢？
 int copy_context_skas0(unsigned long new_stack, int pid)
 {
 	int err;

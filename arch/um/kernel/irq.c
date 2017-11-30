@@ -30,6 +30,8 @@ static struct irq_fd **last_irq_ptr = &active_fds;
 
 extern void free_irqs(void);
 
+//# 如果一个fd被通过fcntl设置了O_ASYNC,那么当他可读写的时候就会收到SIGIO信号
+//# 这是使用SIGIO模拟irq的基础，当然也可以通过F_SETSIG换成别的信号
 void sigio_handler(int sig, struct siginfo *unused_si, struct uml_pt_regs *regs)
 {
 	struct irq_fd *irq_fd;

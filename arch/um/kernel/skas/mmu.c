@@ -48,6 +48,9 @@ static int init_stub_pte(struct mm_struct *mm, unsigned long proc,
 	return -ENOMEM;
 }
 
+//# UML 在fork的时候会在host 创建一个进程,因为需要一个新的mm,调用的是dup_mm()
+//# 然后在exec的时候又创建一个进程，因为exec也需要一个新的mm，调用的是mm_alloc()
+//# 并调用activate_mm() 使当前线程切换到新的mm
 int init_new_context(struct task_struct *task, struct mm_struct *mm)
 {
  	struct mm_context *from_mm = NULL;
