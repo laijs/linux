@@ -4605,6 +4605,7 @@ static void rebind_workers(struct worker_pool *pool)
 
 	spin_lock_irq(&pool->lock);
 
+	//# laijs TODO fixit
 	/*
 	 * XXX: CPU hotplug notifiers are weird and can call DOWN_FAILED
 	 * w/o preceding DOWN_PREPARE.  Work around it.  CPU hotplug is
@@ -4631,6 +4632,7 @@ static void rebind_workers(struct worker_pool *pool)
 		if (worker_flags & WORKER_IDLE)
 			wake_up_process(worker->task);
 
+		//# scheduler wakeup path 可能使用到flags,所以不能在外面clear UNBOUND
 		/*
 		 * We want to clear UNBOUND but can't directly call
 		 * worker_clr_flags() or adjust nr_running.  Atomically
@@ -4715,6 +4717,7 @@ int workqueue_online_cpu(unsigned int cpu)
 		mutex_unlock(&pool->attach_mutex);
 	}
 
+	//# TODO 可以放到hotplug 流程最外面以加快hotplug的速度
 	/* update NUMA affinity of unbound workqueues */
 	list_for_each_entry(wq, &workqueues, list)
 		wq_update_unbound_numa(wq, cpu, true);

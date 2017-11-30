@@ -55,6 +55,7 @@ struct cpuhp_cpu_state {
 	enum cpuhp_state	target;
 	enum cpuhp_state	fail;
 #ifdef CONFIG_SMP
+	//# .store                  = &cpuhp_state.thread, @thread 是有hotplugthread来初始化的
 	struct task_struct	*thread;
 	bool			should_run;
 	bool			rollback;
@@ -952,6 +953,7 @@ void notify_cpu_starting(unsigned int cpu)
 	enum cpuhp_state target = min((int)st->target, CPUHP_AP_ONLINE);
 	int ret;
 
+	//# 这个rcu 的是否可以放到state callback里面呢
 	rcu_cpu_starting(cpu);	/* Enables RCU usage on this CPU. */
 	while (st->state < target) {
 		st->state++;
@@ -1223,6 +1225,7 @@ int __boot_cpu_id;
 
 #endif /* CONFIG_SMP */
 
+//# hotplug 流程调用，但不需要在目标cpu进行的工作
 /* Boot processor state steps */
 static struct cpuhp_step cpuhp_bp_states[] = {
 	[CPUHP_OFFLINE] = {
@@ -1289,6 +1292,7 @@ static struct cpuhp_step cpuhp_bp_states[] = {
 		.teardown.single	= NULL,
 		.cant_stop		= true,
 	},
+	//# 为什么有个AP在这里？
 	[CPUHP_AP_SMPCFD_DYING] = {
 		.name			= "smpcfd:dying",
 		.startup.single		= NULL,
@@ -1309,6 +1313,7 @@ static struct cpuhp_step cpuhp_bp_states[] = {
 #endif
 };
 
+//# 在目标cpu进行的工作
 /* Application processor state steps */
 static struct cpuhp_step cpuhp_ap_states[] = {
 #ifdef CONFIG_SMP
@@ -1324,6 +1329,7 @@ static struct cpuhp_step cpuhp_ap_states[] = {
 		.name			= "ap:offline",
 		.cant_stop		= true,
 	},
+	//# 为什么名字是starting，内容却包含starting 和dying
 	/* First state is scheduler control. Interrupts are disabled */
 	[CPUHP_AP_SCHED_STARTING] = {
 		.name			= "sched:starting",
